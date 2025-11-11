@@ -36,15 +36,15 @@ jobs:
         pip install --upgrade platformio
         
     - name: Build Master
-      run: pio run -e esp32s3dev
+      run: pio run -e master
       
     - name: Build Slave
-      run: pio run -e esp32dev
+      run: pio run -e slave
       
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4    # ← ИСПРАВЛЕНО ЗДЕСЬ!
       with:
         name: firmware
         path: |
-          .pio/build/esp32s3dev/firmware.bin
-          .pio/build/esp32dev/firmware.bin
+          .pio/build/master/firmware.bin
+          .pio/build/slave/firmware.bin

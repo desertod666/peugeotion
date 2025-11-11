@@ -1,6 +1,5 @@
-// SLAVE 8.2-SYNC — ESP32-WROOM-32E (4MB)
-// Синхронизация режимов с Master + автокалибровка
-// ⚠️ ЗАМЕНИТЕ MASTER_AP_MAC на AP MAC мастера!
+// SLAVE 8.2-COMPAT — ESP32-WROOM-32E (4MB) 
+// Совместимость с ESP-IDF 4.x
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -8,7 +7,6 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
-#include <esp_task_wdt.h>
 #include <Preferences.h>
 
 uint8_t MASTER_AP_MAC[6] = {0xDE,0xB4,0xD9,0x07,0x25,0x64};
@@ -20,7 +18,7 @@ const uint8_t LMK[16] = {0x10,0x32,0x54,0x76,0x98,0xba,0xdc,0xfe,0x01,0x23,0x45,
   #define LED_BUILTIN 2
 #endif
 
-static const char* FW_VERSION = "SLV-8.2-SYNC";
+static const char* FW_VERSION = "SLV-8.2-COMPAT";
 
 #define PIN_FUEL_FLOW 4
 #define PIN_WATER_FLOW 5
@@ -199,7 +197,6 @@ void switchToWiFi(const char* ssid, const char* pass){
   Serial.printf("[Slave] Switching to WiFi: %s\n", ssid);
   strncpy(wifi_ssid, ssid, 31);
   strncpy(wifi_pass, pass, 63);
-  
   WiFi.disconnect();
   delay(500);
   WiFi.begin(wifi_ssid, wifi_pass);
@@ -214,10 +211,13 @@ void switchToHotspot(){
   currentNetMode = NET_HOTSPOT;
 }
 
-void onNowSend(const wifi_tx_info_t* info, esp_now_send_status_t s){ (void)info; (void)s; }
+// ESP-IDF 4.x compatible callbacks
+void onNowSend(const uint8_t* mac, esp_now_send_status_t s){ 
+  (void)mac; (void)s; 
+}
 
-void onNowRecv(const esp_now_recv_info_t* info, const uint8_t* d, int len){
-  if(!info || len<1) return;
+void onNowRecv(const uint8_t* mac, const uint8_t* d, int len){
+  if(!mac || len<1) return;
   
   if(d[0]==T_PING && len==(int)sizeof(MsgPing)){
     const MsgPing* p=(const MsgPing*)d;
@@ -296,22 +296,12 @@ void setupHttp(){
 }
 
 void netTask(void*){
-  esp_task_wdt_config_t cfg = { 
-    .timeout_ms = 30000,
-    .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, 
-    .trigger_panic = true 
-  };
-  esp_task_wdt_init(&cfg);
-  esp_task_wdt_add(NULL);
-
   Serial.println("[Slave] Starting network task...");
   vTaskDelay(1000/portTICK_PERIOD_MS);
-  esp_task_wdt_reset();
 
   WiFi.mode(WIFI_STA);
   esp_wifi_set_ps(WIFI_PS_NONE);
   vTaskDelay(100/portTICK_PERIOD_MS);
-  esp_task_wdt_reset();
 
   Serial.println("[Slave] Connecting to master AP...");
   WiFi.begin(AP_SSID, AP_PASS);
@@ -323,21 +313,17 @@ void netTask(void*){
       break;
     }
     vTaskDelay(500/portTICK_PERIOD_MS);
-    esp_task_wdt_reset();
   }
 
   if(WiFi.status()!=WL_CONNECTED){
     Serial.println("[Slave] WARNING: Not connected, but continuing...");
   }
 
-  esp_task_wdt_reset();
-
   if(esp_now_init()!=ESP_OK){ 
     Serial.println("[Slave] ESP-NOW init failed, retrying...");
     vTaskDelay(100/portTICK_PERIOD_MS); 
     esp_now_init(); 
   }
-  esp_task_wdt_reset();
 
   esp_now_set_pmk(PMK);
   esp_now_register_recv_cb(onNowRecv);
@@ -353,11 +339,9 @@ void netTask(void*){
     esp_now_add_peer(&p); 
   }
   vTaskDelay(10/portTICK_PERIOD_MS);
-  esp_task_wdt_reset();
 
   setupHttp();
   vTaskDelay(10/portTICK_PERIOD_MS);
-  esp_task_wdt_reset();
 
   Serial.printf("[Slave] Ready! IP: %s\n", WiFi.localIP().toString().c_str());
   Serial.print("[Slave STA MAC] "); Serial.println(WiFi.macAddress());
@@ -384,7 +368,6 @@ void netTask(void*){
     s.auto_mode = autoMode ? 1 : 0;
     
     esp_now_send(MASTER_AP_MAC,(uint8_t*)&s,sizeof(s));
-    esp_task_wdt_reset();
     
     if(millis() - lastSave > 60000){
       saveCalibration();

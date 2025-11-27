@@ -1,0 +1,12 @@
+{
+  "name": "peugeotion-backend",
+  "version": "1.0.0",
+  "description": "Backend for ESP32 car controller (Render Web Service)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}

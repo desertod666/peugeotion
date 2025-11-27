@@ -66,47 +66,182 @@ let pressT=0,holdTimer=null,tempIgn=false,beforeHold='OFF';
 const power=document.getElementById('power'), knob=document.getElementById('knob'), slider=document.getElementById('engSlider');
 const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
 const doorSlider=document.getElementById('doorSlider'), doorKnob=document.getElementById('doorKnob');
-function colorizePower(){power.classList.remove('off','acc','ign','ready');const s=state.engine;if(s==='OFF')power.classList.add('off');if(s==='ACC')power.classList.add('acc');if(s==='IGN')power.classList.add('ign');if(s==='READY')power.classList.add('ready');}
+
+function colorizePower(){
+  power.classList.remove('off','acc','ign','ready');
+  const s=state.engine;
+  if(s==='OFF')power.classList.add('off');
+  if(s==='ACC')power.classList.add('acc');
+  if(s==='IGN')power.classList.add('ign');
+  if(s==='READY')power.classList.add('ready');
+}
+
 function setEngine(e){fetch('/api/engine?set='+e).then(refresh);}
-function nearestSlot(px,w){const slots=[0,0.333,0.666,1.0];const rel=Math.min(1,Math.max(0,px/(w-70)));let k=0,d=9;for(let i=0;i<4;i++){const dd=Math.abs(rel-slots[i]);if(dd<d){d=dd;k=i;}}return k;}
+
+function nearestSlot(px,w){
+  const slots=[0,0.333,0.666,1.0];
+  const rel=Math.min(1,Math.max(0,px/(w-70)));
+  let k=0,d=9;
+  for(let i=0;i<4;i++){
+    const dd=Math.abs(rel-slots[i]);
+    if(dd<d){d=dd;k=i;}
+  }
+  return k;
+}
+
 function slotToLabel(i){return ['OFF','ACC','IGN','READY'][i];}
 function labelToSlot(s){return {'OFF':0,'ACC':1,'IGN':2,'READY':3}[s]??0;}
-function moveKnob(label){const w=slider.clientWidth;const slots=[0,0.333,0.666,1.0];const x=slots[labelToSlot(label)]*(w-70);knob.style.left=Math.round(x)+'px';knob.textContent=label;}
-function drawHeatSegs(n){heatSegs.innerHTML='';for(let i=1;i<=9;i++){const d=document.createElement('div');d.style.flex='1';d.style.height='10px';d.style.borderRadius='6px';d.style.background='#3b4257';d.style.opacity='0.45';if(i<=n){d.style.opacity='1';d.style.background=(i<=3?'#2ecc71':(i<=6?'#f0b429':'#e74c3c'));}heatSegs.appendChild(d);}}
+
+function moveKnob(label){
+  const w=slider.clientWidth;
+  const slots=[0,0.333,0.666,1.0];
+  const x=slots[labelToSlot(label)]*(w-70);
+  knob.style.left=Math.round(x)+'px';
+  knob.textContent=label;
+}
+
+function drawHeatSegs(n){
+  heatSegs.innerHTML='';
+  for(let i=1;i<=9;i++){
+    const d=document.createElement('div');
+    d.style.flex='1';
+    d.style.height='10px';
+    d.style.borderRadius='6px';
+    d.style.background='#3b4257';
+    d.style.opacity='0.45';
+    if(i<=n){
+      d.style.opacity='1';
+      d.style.background=(i<=3?'#2ecc71':(i<=6?'#f0b429':'#e74c3c'));
+    }
+    heatSegs.appendChild(d);
+  }
+}
+
 async function refresh() {
-  const r=await fetch('/api/state');const js=await r.json();
+  const r=await fetch('/api/state');
+  const js=await r.json();
   state.engine=js.engine;state.heater=js.heater;state.level=js.level;
-  document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
-  document.getElementById('intTemp').textContent=js.intTemp.toFixed(0)+'°C';
-  document.getElementById('engBadge').textContent=state.engine; colorizePower();moveKnob(state.engine);
+
+  document.getElementById('heaterBadge').textContent=
+    state.heater?('ON ('+state.level+')'):'OFF';
+  document.getElementById('intTemp').textContent=
+    js.intTemp.toFixed(0)+'°C';
+
+  document.getElementById('engBadge').textContent=state.engine;
+  colorizePower();
+  moveKnob(state.engine);
+
   heaterBtn.className='btn big '+(state.heater?'green':'gray');
   heaterCtl.style.display=state.heater?'block':'none';
   document.getElementById('heatLvlTag').textContent='Level: '+state.level+'/9';
   drawHeatSegs(state.level);
+
   const online=!js.slave_stale;
   const heaterStates=['OFF','STARTING','RUNNING','COOLING'];
-  document.getElementById('heaterStatus').textContent=heaterStates[js.slave_heater_state]||'UNKNOWN';
-  const statusTxt = online?'<span class="online">Online</span>':'<span class="offline">Offline</span>';
+  document.getElementById('heaterStatus').textContent=
+    heaterStates[js.slave_heater_state]||'UNKNOWN';
+
+  const statusTxt = online?'<span class="online">Online</span>'
+                          :'<span class="offline">Offline</span>';
   const consumedMl = online?((js.slave_consumed_ml||0).toFixed(0))+' ml':'—';
   document.getElementById('fuelTag').innerHTML=statusTxt+' • '+consumedMl;
 }
+
 function setHeater(on){fetch('/api/heater?enable='+(on?1:0)).then(refresh);}
 function setHeaterLevel(lv){fetch('/api/heater?level='+lv).then(refresh);}
-power.addEventListener('pointerdown',e=>{beforeHold=state.engine;pressT=Date.now();clearTimeout(holdTimer);tempIgn=false;holdTimer=setTimeout(()=>{tempIgn=true;setEngine('IGN');},1000);});
-power.addEventListener('pointerup',e=>{const dt=Date.now()-pressT;clearTimeout(holdTimer);if(dt<1000){const next=(state.engine==='ACC')?'OFF':'ACC';setEngine(next);}else if(dt<3000){if(tempIgn)setEngine(beforeHold);}else{setEngine('READY');}});
+
+// Логика кнопки питания (короткое/долгое/очень долгое нажатие)
+power.addEventListener('pointerdown',e=>{
+  beforeHold=state.engine;
+  pressT=Date.now();
+  clearTimeout(holdTimer);
+  tempIgn=false;
+  holdTimer=setTimeout(()=>{
+    tempIgn=true;
+    setEngine('IGN');
+  },1000);
+});
+power.addEventListener('pointerup',e=>{
+  const dt=Date.now()-pressT;
+  clearTimeout(holdTimer);
+  if(dt<1000){
+    const next=(state.engine==='ACC')?'OFF':'ACC';
+    setEngine(next);
+  }else if(dt<3000){
+    if(tempIgn)setEngine(beforeHold);
+  }else{
+    setEngine('READY');
+  }
+});
+
+// Перетаскивание ползунка двигателя
 let drag=false,startX=0,startLeft=0;
-slider.addEventListener('pointerdown',e=>{drag=true;slider.setPointerCapture(e.pointerId);startX=e.clientX;startLeft=knob.offsetLeft;});
-slider.addEventListener('pointermove',e=>{if(!drag)return;const w=slider.clientWidth;let x=startLeft+(e.clientX-startX);x=Math.max(0,Math.min(w-70,x));knob.style.left=x+'px';});
-slider.addEventListener('pointerup',e=>{drag=false;const w=slider.clientWidth;const slot=nearestSlot(knob.offsetLeft,w);const label=slotToLabel(slot);moveKnob(label);setEngine(label);});
-heaterBtn.addEventListener('click',()=>{setHeater(!state.heater);});
-document.getElementById('heatPlus').addEventListener('click',()=>{let n=Math.min(9,state.level+1);setHeaterLevel(n);});
-document.getElementById('heatMinus').addEventListener('click',()=>{let n=Math.max(1,state.level-1);setHeaterLevel(n);});
+slider.addEventListener('pointerdown',e=>{
+  drag=true;slider.setPointerCapture(e.pointerId);
+  startX=e.clientX;startLeft=knob.offsetLeft;
+});
+slider.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const w=slider.clientWidth;
+  let x=startLeft+(e.clientX-startX);
+  x=Math.max(0,Math.min(w-70,x));
+  knob.style.left=x+'px';
+});
+slider.addEventListener('pointerup',e=>{
+  drag=false;
+  const w=slider.clientWidth;
+  const slot=nearestSlot(knob.offsetLeft,w);
+  const label=slotToLabel(slot);
+  moveKnob(label);
+  setEngine(label);
+});
+
+// Кнопка дизельного отопителя и уровни
+heaterBtn.addEventListener('click',()=>{
+  setHeater(!state.heater);
+});
+document.getElementById('heatPlus').addEventListener('click',()=>{
+  let n=Math.min(9,state.level+1);
+  setHeaterLevel(n);
+});
+document.getElementById('heatMinus').addEventListener('click',()=>{
+  let n=Math.max(1,state.level-1);
+  setHeaterLevel(n);
+});
+
+// Логика слайдера двери
 let dDrag=false,dStartX=0,dStartLeft=0;
-function doorCenter(){const w=doorSlider.clientWidth;const x=(w-64)/2;doorKnob.style.left=Math.round(x)+'px';}
-function doorDo(act){fetch('/api/door_act?action='+act).then(()=>doorCenter());}
+function doorCenter(){
+  const w=doorSlider.clientWidth;
+  const x=(w-64)/2;
+  doorKnob.style.left=Math.round(x)+'px';
+}
+function doorDo(act){
+  fetch('/api/door_act?action='+act).then(()=>doorCenter());
+}
 doorCenter();
-doorSlider.addEventListener('pointerdown',e=>{dDrag=true;doorSlider.setPointerCapture(e.pointerId);dStartX=e.clientX;dStartLeft=doorKnob.offsetLeft;});
-doorSlider.addEventListener('pointermove',e=>{if(!dDrag)return;const w=doorSlider.clientWidth;let x=dStartLeft+(e.clientX-dStartX);x=Math.max(0,Math.min(w-64,x));doorKnob.style.left=x+'px';});
-doorSlider.addEventListener('pointerup',e=>{dDrag=false;const w=doorSlider.clientWidth;const center=(w-64)/2;const x=doorKnob.offsetLeft;const thr=w*0.15;if (x < center - thr) doorDo('LOCK');else if (x > center + thr) doorDo('UNLOCK');else doorCenter();});
-refresh();setInterval(refresh,3000);
+doorSlider.addEventListener('pointerdown',e=>{
+  dDrag=true;doorSlider.setPointerCapture(e.pointerId);
+  dStartX=e.clientX;dStartLeft=doorKnob.offsetLeft;
+});
+doorSlider.addEventListener('pointermove',e=>{
+  if(!dDrag)return;
+  const w=doorSlider.clientWidth;
+  let x=dStartLeft+(e.clientX-dStartX);
+  x=Math.max(0,Math.min(w-64,x));
+  doorKnob.style.left=x+'px';
+});
+doorSlider.addEventListener('pointerup',e=>{
+  dDrag=false;
+  const w=doorSlider.clientWidth;
+  const center=(w-64)/2;
+  const x=doorKnob.offsetLeft;
+  const thr=w*0.15;
+  if (x < center - thr) doorDo('LOCK');
+  else if (x > center + thr) doorDo('UNLOCK');
+  else doorCenter();
+});
+
+refresh();
+setInterval(refresh,3000);
 </script></body></html>

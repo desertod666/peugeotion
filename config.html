@@ -1,0 +1,355 @@
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configuration</title>
+<style>
+:root{--bg:#0f1420;--panel:#1c2333;--txt:#e6e8ef;--muted:#9aa3b2;--accent:#d94f4f;--ok:#32d583;--info:#3b82f6;}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,system-ui,Arial}.wrap{max-width:500px;margin:0 auto;padding:16px}
+.card{background:#1c2333;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.35);margin:14px 0}.hdr{font-weight:800;font-size:18px;margin-bottom:12px}
+.btn{padding:12px 16px;border-radius:10px;background:#39425e;border:none;color:#e9edf4;cursor:pointer;font-size:14px;font-weight:600}
+.btn.primary{background:#3b82f6}.btn.danger{background:#d84d4d}.btn.success{background:#24a06b}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0}
+.list-item{background:#2a3246;padding:12px;border-radius:8px;margin:8px 0;display:flex;justify-content:space-between;align-items:center}
+.list-item .name{font-weight:600}
+.list-item .actions{display:flex;gap:8px}
+.online{color:#32d583}.offline{color:#d84d4f}
+.spinner{border:3px solid #3b4254;border-top:3px solid #3b82f6;border-radius:50%;width:20px;height:20px;animation:spin 1s linear infinite;display:inline-block}
+@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+.scan-item-row{background:#2a3246;padding:10px;border-radius:8px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.scan-item-row:hover{background:#333d54}
+.scan-info{flex:1;pointer-events:none}.scan-ssid{font-weight:600;display:block}.scan-rssi{font-size:12px;color:#9aa3b2}
+.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center}
+.modal.show{display:flex}
+.modal-content{background:#1c2333;border-radius:16px;padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.modal-header{font-weight:800;font-size:18px;margin-bottom:16px}
+.modal-body{margin-bottom:16px}
+.modal-footer{display:flex;gap:12px;justify-content:flex-end}
+</style></head><body>
+<div class="wrap">
+  <div class="card">
+    <div class="hdr">System Status</div>
+    <div style="margin:12px 0">
+      <div><strong>Firmware:</strong> <span id="fwVersion">--</span></div>
+      <div style="margin-top:8px"><strong>Network Mode:</strong> <span id="netMode">--</span></div>
+      <div style="margin-top:8px"><strong>IP Address:</strong> <span id="ipAddr">--</span></div>
+      <div style="margin-top:8px"><strong>Internet:</strong> <span id="netStatus">--</span></div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">Slave Device</div>
+    <div style="margin:12px 0">
+      <div><strong>Version:</strong> <span id="slaveVer">--</span></div>
+      <div style="margin-top:8px"><strong>Status:</strong> <span id="slaveStatus">--</span></div>
+      <div style="margin-top:8px"><strong>Tank:</strong> <span id="slaveTank">--</span> ml</div>
+      <div style="margin-top:8px"><strong>Consumed:</strong> <span id="slaveConsumed">--</span> ml</div>
+      <div style="margin-top:8px"><strong>ml/tick:</strong> <span id="slaveMlpt">--</span></div>
+    </div>
+    <button class="btn primary" onclick="pingSlave()">Ping Slave</button>
+    <div style="height:12px"></div>
+    <div class="hdr" style="font-size:14px">Calibration</div>
+    <input type="number" id="mlPerTick" class="input" placeholder="ml per tick" step="0.00001" value="0.03">
+    <button class="btn" onclick="setMlPerTick()">Set ml/tick</button>
+    <div style="height:8px"></div>
+    <input type="number" id="refilledMl" class="input" placeholder="Refilled ml" step="1">
+    <button class="btn" onclick="sendRefill()">Refilled</button>
+    <div style="height:8px"></div>
+    <button class="btn danger" onclick="resetCalib()">Reset Calibration</button>
+    <button class="btn" onclick="enableAuto()">Enable Auto</button>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">WiFi Networks</div>
+    <button class="btn primary" onclick="startScan()" id="scanBtn">Scan Networks</button>
+    <div id="scanResults" style="margin-top:12px"></div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">Saved Networks</div>
+    <div id="savedList"></div>
+  </div>
+  
+  <div class="card">
+    <button class="btn danger" onclick="disconnectWiFi()">Disconnect WiFi (Return to Hotspot)</button>
+  </div>
+  
+  <button class="btn" onclick="location.href='/'">← Back to Dashboard</button>
+</div>
+
+<div id="passwordModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">WiFi login</div>
+    <div class="modal-body">
+      <div style="font-size:14px;color:#9aa3b2;margin-bottom:6px">
+        Проверить/исправить название сети и ввести пароль.
+      </div>
+      <input type="text" id="wifiSsid" class="input" placeholder="Network name (SSID)">
+      <input type="password" id="wifiPassword" class="input" placeholder="Password">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closePasswordModal()">Cancel</button>
+      <button class="btn primary" onclick="submitPassword()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let scanInterval = null;
+let pendingSSID = '';
+let networksList = [];
+
+async function refresh(){
+  try{
+    const r = await fetch('/api/state');
+    const js = await r.json();
+    
+    const r2 = await fetch('/api/slave_status');
+    const slave = await r2.json();
+    
+    const r3 = await fetch('/api/internet_status');
+    const net = await r3.json();
+    
+    document.getElementById('fwVersion').textContent = 'MSTR-9.06';
+    document.getElementById('netMode').textContent = net.mode || 'hotspot';
+    document.getElementById('ipAddr').textContent = net.mode === 'wifi' ? 'Connected' : '192.168.4.1';
+    document.getElementById('netStatus').innerHTML = net.online ? '<span class="online">Online</span>' : '<span class="offline">Offline</span>';
+    
+    document.getElementById('slaveVer').textContent = slave.version || 'UNKNOWN';
+    document.getElementById('slaveStatus').innerHTML = slave.stale ? '<span class="offline">Offline</span>' : '<span class="online">Online</span>';
+    document.getElementById('slaveTank').textContent = slave.tank_ml || '--';
+    document.getElementById('slaveConsumed').textContent = slave.consumed_ml || '--';
+    document.getElementById('slaveMlpt').textContent = slave.ml_per_tick ? slave.ml_per_tick.toFixed(5) : '--';
+  }catch(e){
+    console.error('Refresh error:', e);
+  }
+}
+
+async function loadSavedNetworks(){
+  const r = await fetch('/saved_networks');
+  const list = await r.json();
+  
+  const div = document.getElementById('savedList');
+  if(list.length === 0){
+    div.innerHTML = '<p style="color:#9aa3b2;font-size:14px">No saved networks</p>';
+    return;
+  }
+  
+  let html = '';
+  for(let i = 0; i < list.length; i++){
+    const net = list[i];
+    html += '<div class="list-item">';
+    html += '<div class="name">' + net.ssid + '</div>';
+    html += '<div class="actions">';
+    html += '<button class="btn danger" onclick="removeNet(' + net.index + ')">Remove</button>';
+    html += '</div></div>';
+  }
+  div.innerHTML = html;
+}
+
+async function removeNet(idx){
+  await fetch('/remove_network?index=' + idx);
+  await loadSavedNetworks();
+}
+
+async function startScan(){
+  document.getElementById('scanBtn').disabled = true;
+  document.getElementById('scanResults').innerHTML = '<div class="spinner"></div> Scanning...';
+  
+  await fetch('/start_scan');
+  
+  scanInterval = setInterval(checkScanResults, 2000);
+}
+
+async function checkScanResults(){
+  const r = await fetch('/scan_results');
+  const data = await r.json();
+  
+  if(!data.scanning){
+    clearInterval(scanInterval);
+    scanInterval = null;
+    document.getElementById('scanBtn').disabled = false;
+    
+    const div = document.getElementById('scanResults');
+    if(data.list.length === 0){
+      div.innerHTML = '<p style="color:#9aa3b2;font-size:14px;margin:8px 0">No networks found</p>';
+      return;
+    }
+    
+    networksList = data.list;
+    
+    let html = '';
+    for(let i = 0; i < data.list.length; i++){
+      const net = data.list[i];
+      const ssid = net.ssid;
+      const isSecure = net.secure;
+      const rssi = net.rssi;
+      
+      html += '<div class="scan-item-row" data-index="' + i + '">';
+      html += '<div class="scan-info">';
+      html += '<span class="scan-ssid">' + ssid + ' ' + (isSecure ? '🔒' : '📡') + '</span>';
+      html += '<span class="scan-rssi">' + rssi + ' dBm</span>';
+      html += '</div></div>';
+    }
+    div.innerHTML = html;
+
+    document.querySelectorAll('.scan-item-row').forEach(row => {
+      row.addEventListener('click', function(){
+        const idx = parseInt(this.getAttribute('data-index'));
+        selectNetwork(idx);
+      });
+    });
+
+  }
+}
+
+function selectNetwork(index){
+  const net = networksList[index];
+  if (!net){
+    alert('Internal error: network not found');
+    return;
+  }
+
+  const ssid = net.ssid;
+  const isSecure = net.secure;
+
+  console.log('Selected network SSID:', ssid, 'Secure:', isSecure);
+
+  if (!ssid || ssid.length === 0){
+    alert('Эта сеть имеет скрытый SSID и не поддерживается. Выберите другую сеть.');
+    return;
+  }
+
+  // Всегда открываем модалку, даже для открытых сетей:
+  showPasswordModal(ssid);
+}
+
+function showPasswordModal(ssid){
+  pendingSSID = ssid || '';
+
+  const modal = document.getElementById('passwordModal');
+  const ssidInput = document.getElementById('wifiSsid');
+  const passInput = document.getElementById('wifiPassword');
+
+  // Подставляем выбранный SSID в поле логина
+  ssidInput.value = pendingSSID;
+  passInput.value = '';
+
+  modal.classList.add('show');
+}
+
+function closePasswordModal(){
+  const modal = document.getElementById('passwordModal');
+  modal.classList.remove('show');
+}
+
+function submitPassword(){
+  const ssidInput = document.getElementById('wifiSsid');
+  const passInput = document.getElementById('wifiPassword');
+
+  const ssid = ssidInput.value.trim();
+  const password = passInput.value;
+
+  if(!ssid){
+    alert('Введите имя сети (SSID)');
+    return;
+  }
+  if(ssid.length > 31){
+    alert('SSID слишком длинный (макс. 31 символ)');
+    return;
+  }
+
+  closePasswordModal();
+  connectToNetwork(ssid, password);
+}
+
+async function connectToNetwork(ssid, password){
+  console.log('Connecting to SSID:', ssid, 'Password length:', password.length);
+  
+  const scanDiv = document.getElementById('scanResults');
+  scanDiv.innerHTML = '<div class="spinner"></div> Connecting to ' + ssid + '...';
+  
+  try {
+    const url = '/add_network?ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent(password);
+    console.log('Request URL:', url);
+    
+    const response = await fetch(url);
+    
+    if(response.ok){
+      scanDiv.innerHTML = '<p style="color:#32d583;font-size:14px;margin:8px 0">✓ Connecting... Please wait up to 60 seconds</p>';
+      await loadSavedNetworks();
+      
+      for(let i = 0; i < 6; i++){
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        await refresh();
+      }
+      
+      scanDiv.innerHTML = '<p style="color:#32d583;font-size:14px;margin:8px 0">✓ Connection completed</p>';
+    } else {
+      const error = await response.text();
+      scanDiv.innerHTML = '<p style="color:#d94f4f;font-size:14px;margin:8px 0">✗ Connection failed: ' + error + '</p>';
+      setTimeout(startScan, 2000);
+    }
+  } catch(e){
+    scanDiv.innerHTML = '<p style="color:#d94f4f;font-size:14px;margin:8px 0">✗ Error: ' + e.message + '</p>';
+    setTimeout(startScan, 2000);
+  }
+}
+
+async function disconnectWiFi(){
+  await fetch('/api/disconnect_wifi', {method: 'POST'});
+  setTimeout(refresh, 3000);
+}
+
+async function pingSlave(){
+  await fetch('/api/ping', {method: 'POST'});
+  setTimeout(refresh, 1000);
+}
+
+async function setMlPerTick(){
+  const val = document.getElementById('mlPerTick').value;
+  if(!val || val <= 0) return;
+  
+  const response = await fetch('/api/slave_mlpt', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'value=' + val
+  });
+  
+  if(response.ok){
+    setTimeout(refresh, 1000);
+  }
+}
+
+async function enableAuto(){
+  const response = await fetch('/api/enable_auto', {method: 'POST'});
+  if(response.ok){
+    setTimeout(refresh, 1000);
+  }
+}
+
+async function sendRefill(){
+  const val = document.getElementById('refilledMl').value;
+  if(!val || val <= 0) return;
+  
+  const response = await fetch('/api/refilled', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'ml=' + val
+  });
+  
+  if(response.ok){
+    setTimeout(refresh, 1000);
+  }
+}
+
+async function resetCalib(){
+  const response = await fetch('/api/slave_reset', {method: 'POST'});
+  if(response.ok){
+    setTimeout(refresh, 1000);
+  }
+}
+
+refresh();
+loadSavedNetworks();
+setInterval(refresh, 5000);
+</script></body></html>

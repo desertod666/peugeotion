@@ -12,6 +12,10 @@ const PORT = process.env.PORT || 3000;
 // Токен для запросов от ESP
 const API_TOKEN = process.env.API_TOKEN || '';
 
+app.get('/config', (req, res) => {
+  res.sendFile(path.join(__dirname, 'config.html'));
+});
+
 app.use(express.json());
 
 // ================== ВИРТУАЛЬНОЕ СОСТОЯНИЕ МАШИНЫ ==================

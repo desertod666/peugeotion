@@ -21,370 +21,265 @@ let lastState = {
 // Очередь команд для ESP32
 let commandQueue = [];
 
-// История команд (последние 20)
-let commandHistory = [];
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ---------- ОБЩИЙ CSS ----------
-
-const commonCSS = `
-body{margin:0;padding:0;background:#0f1420;color:#e6e8ef;font-family:system-ui,Arial}
-.wrap{max-width:800px;margin:0 auto;padding:20px}
-.card{background:#1c2333;border-radius:12px;padding:20px;margin:16px 0;box-shadow:0 4px 12px rgba(0,0,0,.4)}
-h1{margin-top:0;font-size:28px;font-weight:800}
-h2{font-size:20px;font-weight:700;margin-top:0}
-.row{display:flex;justify-content:space-between;margin:10px 0;align-items:center}
-.btn{padding:10px 20px;border-radius:8px;border:none;background:#2563eb;color:#fff;cursor:pointer;font-size:14px;font-weight:600}
-.btn:hover{background:#3b82f6}
-.btn.danger{background:#d84d4d}
-.btn.danger:hover{background:#e74c3c}
-.btn.success{background:#24a06b}
-.btn.success:hover{background:#2ecc71}
-input,select,textarea{padding:10px;border-radius:6px;border:1px solid #3b4254;background:#111827;color:#e5e7eb;font-size:14px;width:100%;box-sizing:border-box;margin:8px 0}
-label{display:block;font-size:13px;font-weight:600;margin:12px 0 4px;color:#9aa3b2}
-.badge{background:#2a3146;padding:6px 12px;border-radius:8px;font-size:13px;font-weight:600}
-.online{color:#32d583}.offline{color:#d84d4f}
-table{width:100%;border-collapse:collapse;margin:12px 0}
-th,td{padding:10px;text-align:left;border-bottom:1px solid #2a3246}
-th{background:#2a3246;font-weight:700}
-.nav{display:flex;gap:12px;margin-bottom:20px}
-.nav a{text-decoration:none;color:#e6e8ef;padding:10px 16px;border-radius:8px;background:#2a3246;font-weight:600}
-.nav a:hover{background:#3b4254}
-.status-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
-.status-item{background:#2a3246;padding:12px;border-radius:8px}
-.status-label{font-size:12px;color:#9aa3b2;margin-bottom:4px}
-.status-value{font-size:18px;font-weight:700}
-`;
-
-// ---------- ГЛАВНАЯ СТРАНИЦА ----------
+// ---------- ГЛАВНАЯ СТРАНИЦА (ТВО ДИЗАЙН ИЗ dashboard_html) ----------
 
 app.get('/', (req, res) => {
-  const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
-  const isOnline = stateAge < 120;
-  
   res.send(`
-<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peugeotion • Control</title>
-<style>${commonCSS}</style>
-</head><body>
-<div class="wrap">
-  <div class="nav">
-    <a href="/">Dashboard</a>
-    <a href="/settings">Settings</a>
-    <a href="/history">History</a>
-  </div>
-  
-  <div class="card">
-    <h1>🚗 Peugeotion Control</h1>
-    <div class="status-grid">
-      <div class="status-item">
-        <div class="status-label">CONNECTION</div>
-        <div class="status-value ${isOnline ? 'online' : 'offline'}">
-          ${isOnline ? 'ONLINE' : 'OFFLINE'}
-        </div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">LAST UPDATE</div>
-        <div class="status-value">${stateAge}s ago</div>
-      </div>
-    </div>
-  </div>
-  
-  <div class="card">
-    <h2>Vehicle Status</h2>
-    <div class="status-grid">
-      <div class="status-item">
-        <div class="status-label">ENGINE</div>
-        <div class="status-value" id="engine">${lastState.engine}</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">HEATER</div>
-        <div class="status-value" id="heater">${lastState.heater ? 'ON' : 'OFF'}</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">LEVEL</div>
-        <div class="status-value" id="level">${lastState.level}/9</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">BATTERY</div>
-        <div class="status-value" id="batt">${(lastState.batt / 1000).toFixed(2)}V</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">FUEL TANK</div>
-        <div class="status-value" id="tank">${lastState.tank} ml</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">CONSUMED</div>
-        <div class="status-value" id="cons">${lastState.cons} ml</div>
-      </div>
-    </div>
-  </div>
-  
-  <div class="card">
-    <h2>Send Command</h2>
-    <form onsubmit="sendCmd(event)">
-      <label>Engine Mode</label>
-      <select id="engineSel">
-        <option value="">—</option>
-        <option value="OFF">OFF</option>
-        <option value="ACC">ACC</option>
-        <option value="IGN">IGN</option>
-        <option value="READY">READY</option>
-      </select>
-      
-      <label>Heater</label>
-      <select id="heaterSel">
-        <option value="">—</option>
-        <option value="0">OFF</option>
-        <option value="1">ON</option>
-      </select>
-      
-      <label>Heater Level (1-9)</label>
-      <input id="levelInp" type="number" min="1" max="9" placeholder="Leave empty if not needed">
-      
-      <label>Door Action</label>
-      <select id="doorSel">
-        <option value="">—</option>
-        <option value="LOCK">LOCK</option>
-        <option value="UNLOCK">UNLOCK</option>
-      </select>
-      
-      <label>Prevent Sleep (seconds)</label>
-      <input id="noSleep" type="number" min="0" max="3600" placeholder="0 = no restriction">
-      
-      <button class="btn success" type="submit" style="width:100%;margin-top:16px">Queue Command</button>
-    </form>
-  </div>
-  
-  <div class="card">
-    <h2>Command Queue</h2>
-    <p style="color:#9aa3b2;font-size:14px">
-      Queued commands: <strong id="queueCount">${commandQueue.length}</strong>
-    </p>
-    <button class="btn danger" onclick="clearQueue()" style="margin-top:8px">Clear Queue</button>
-  </div>
-</div>
-
-<script>
-async function sendCmd(e) {
-  e.preventDefault();
-  const eng = document.getElementById('engineSel').value;
-  const heat = document.getElementById('heaterSel').value;
-  const lvl = document.getElementById('levelInp').value;
-  const door = document.getElementById('doorSel').value;
-  const noSleep = document.getElementById('noSleep').value;
-  
-  let cmd = '';
-  if(eng) cmd += 'ENGINE=' + eng + ';';
-  if(heat) cmd += 'HEATER=' + heat + ';';
-  if(lvl) cmd += 'LEVEL=' + lvl + ';';
-  if(door) cmd += 'DOOR=' + door + ';';
-  if(noSleep && parseInt(noSleep) > 0) cmd += 'NOSLEEP=' + noSleep + ';';
-  
-  if(!cmd) {
-    alert('Please select at least one command');
-    return;
-  }
-  
-  await fetch('/api/queue_cmd?cmd=' + encodeURIComponent(cmd));
-  alert('Command queued: ' + cmd);
-  document.getElementById('engineSel').value = '';
-  document.getElementById('heaterSel').value = '';
-  document.getElementById('levelInp').value = '';
-  document.getElementById('doorSel').value = '';
-  document.getElementById('noSleep').value = '';
-  updateQueue();
-}
-
-async function clearQueue() {
-  await fetch('/api/clear_queue', {method: 'POST'});
-  alert('Queue cleared');
-  updateQueue();
-}
-
-async function updateQueue() {
-  const r = await fetch('/api/queue_status');
-  const j = await r.json();
-  document.getElementById('queueCount').textContent = j.count;
-}
-
-setInterval(async () => {
-  const r = await fetch('/api/state');
-  const j = await r.json();
-  document.getElementById('engine').textContent = j.engine;
-  document.getElementById('heater').textContent = j.heater ? 'ON' : 'OFF';
-  document.getElementById('level').textContent = j.level + '/9';
-  document.getElementById('batt').textContent = (j.batt / 1000).toFixed(2) + 'V';
-  document.getElementById('tank').textContent = j.tank + ' ml';
-  document.getElementById('cons').textContent = j.cons + ' ml';
-  updateQueue();
-}, 3000);
-
-updateQueue();
-</script>
-</body></html>
-  `);
-});
-
-// ---------- СТРАНИЦА НАСТРОЕК ----------
-
-app.get('/settings', (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peugeotion • Settings</title>
-<style>${commonCSS}</style>
-</head><body>
-<div class="wrap">
-  <div class="nav">
-    <a href="/">Dashboard</a>
-    <a href="/settings">Settings</a>
-    <a href="/history">History</a>
-  </div>
-  
-  <div class="card">
-    <h1>⚙️ Server Settings</h1>
-    <p style="color:#9aa3b2;font-size:14px;margin-top:0">
-      Configure server behavior and monitoring.
-    </p>
-  </div>
-  
-  <div class="card">
-    <h2>Auto Commands</h2>
-    <p style="color:#9aa3b2;font-size:14px">
-      Automatically send commands based on conditions (coming soon).
-    </p>
-    <label>Enable Auto-Commands</label>
-    <select disabled>
-      <option>Disabled (not implemented)</option>
-    </select>
-  </div>
-  
-  <div class="card">
-    <h2>Notifications</h2>
-    <p style="color:#9aa3b2;font-size:14px">
-      Get notified when ESP32 goes offline or battery is low (coming soon).
-    </p>
-    <label>Email Notifications</label>
-    <input type="email" placeholder="your@email.com" disabled>
-    <button class="btn" disabled style="margin-top:12px">Save (not implemented)</button>
-  </div>
-  
-  <div class="card">
-    <h2>Data Retention</h2>
-    <p style="color:#9aa3b2;font-size:14px">
-      Currently storing last state in memory. History stored for last 20 commands.
-    </p>
-    <div class="row">
-      <span>Commands in queue:</span>
-      <span class="badge" id="queueCount">${commandQueue.length}</span>
-    </div>
-    <div class="row">
-      <span>History entries:</span>
-      <span class="badge">${commandHistory.length}</span>
-    </div>
-    <button class="btn danger" onclick="clearAll()" style="margin-top:12px">Clear All Data</button>
-  </div>
-  
-  <div class="card">
-    <h2>API Info</h2>
-    <p style="color:#9aa3b2;font-size:14px;margin-bottom:12px">
-      Endpoints for ESP32:
-    </p>
-    <table>
-      <tr><th>Endpoint</th><th>Method</th><th>Description</th></tr>
-      <tr><td>/api/update</td><td>GET</td><td>ESP32 sends state</td></tr>
-      <tr><td>/api/cmd</td><td>GET</td><td>ESP32 requests commands</td></tr>
-      <tr><td>/api/state</td><td>GET</td><td>Get last state (JSON)</td></tr>
-    </table>
-  </div>
-</div>
-
-<script>
-async function clearAll() {
-  if(!confirm('Clear all queued commands and history?')) return;
-  await fetch('/api/clear_queue', {method: 'POST'});
-  await fetch('/api/clear_history', {method: 'POST'});
-  alert('All data cleared');
-  location.reload();
-}
-
-async function updateQueue() {
-  const r = await fetch('/api/queue_status');
-  const j = await r.json();
-  document.getElementById('queueCount').textContent = j.count;
-}
-updateQueue();
-setInterval(updateQueue, 3000);
-</script>
-</body></html>
-  `);
-});
-
-// ---------- СТРАНИЦА ИСТОРИИ ----------
-
-app.get('/history', (req, res) => {
-  let historyHTML = '';
-  if (commandHistory.length === 0) {
-    historyHTML = '<p style="color:#9aa3b2;font-size:14px">No commands sent yet.</p>';
-  } else {
-    historyHTML = '<table><tr><th>Time</th><th>Command</th><th>Status</th></tr>';
-    for (let i = commandHistory.length - 1; i >= 0; i--) {
-      const h = commandHistory[i];
-      historyHTML += `<tr>
-        <td>${new Date(h.timestamp).toLocaleString()}</td>
-        <td><code>${h.command}</code></td>
-        <td><span class="badge">${h.status}</span></td>
-      </tr>`;
-    }
-    historyHTML += '</table>';
-  }
-  
-  res.send(`
-<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peugeotion • History</title>
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Car Control • Dashboard</title>
 <style>
-${commonCSS}
-code{background:#2a3246;padding:2px 6px;border-radius:4px;font-size:12px;font-family:monospace}
-</style>
-</head><body>
+:root{--bg:#0f1420;--panel:#1c2333;--txt:#e6e8ef;--muted:#9aa3b2;--accent:#d94f4f;--ok:#32d583;--info:#3b82f6;--off:#475064;--btn:#303a52;--track:#2a3246;}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,system-ui,Arial}.wrap{max-width:420px;margin:0 auto;padding:16px}
+.card{background:#1c2333;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.35);margin:14px 0}.hdr{font-weight:800;font-size:20px;margin-bottom:10px}
+.row{display:flex;gap:12px;align-items:center}.btn{width:100%;padding:14px;border-radius:12px;background:#39425e;border:none;color:#e9edf4;cursor:pointer}
+.btn.big{font-weight:800;font-size:17px}.btn.red{background:#d84d4d}.btn.green{background:#24a06b}.btn.gray{background:#3b4254}
+.icon{font-size:20px;margin-right:8px}.mini{font-size:12px;color:#9aa3b2}
+.power{display:flex;align-items:center;justify-content:center;height:48px;border-radius:12px;background:var(--btn);cursor:pointer;user-select:none}
+.power.off{background:var(--off)}.power.acc{background:var(--info)}.power.ign{background:var(--accent)}.power.ready{background:var(--ok)}
+.slider{position:relative;height:50px;background:var(--track);border-radius:16px;padding:8px;user-select:none;touch-action:none}
+.knob{position:absolute;top:8px;width:70px;height:34px;border-radius:12px;background:#fff;color:#111;display:flex;align-items:center;justify-content:center;font-weight:800;cursor:grab;box-shadow:0 6px 14px rgba(0,0,0,.35)}
+.legend{display:flex;justify-content:space-between;font-size:11px;color:#aab0bd;margin-top:6px}
+.badge{background:#2a3146;color:#c6ccda;border-radius:10px;padding:4px 10px;font-weight:700}
+.tag{background:#2a3246;color:#cbd5e1;border-radius:12px;padding:6px 10px;font-weight:700}
+.row.space{justify-content:space-between}
+.vstatus .row.space{margin:12px 0}
+.sensors .row.space{margin:12px 0}
+.trkLabel{position:absolute;top:6px;font-weight:800;font-size:12px;color:#cbd5e1;user-select:none;pointer-events:none}
+.trkLabel.lock{left:10px}.trkLabel.unlock{right:10px}
+.online{color:#32d583}.offline{color:#d84d4f}
+</style></head><body>
 <div class="wrap">
-  <div class="nav">
-    <a href="/">Dashboard</a>
-    <a href="/settings">Settings</a>
-    <a href="/history">History</a>
-  </div>
-  
   <div class="card">
-    <h1>📜 Command History</h1>
-    <p style="color:#9aa3b2;font-size:14px;margin-top:0">
-      Last ${commandHistory.length} commands sent to ESP32.
-    </p>
+    <div class="hdr">Controls</div>
+    <div id="power" class="power off"><span class="icon">⏻</span></div>
+    <div style="height:10px"></div>
+    <div class="slider" id="engSlider"><div class="knob" id="knob">OFF</div></div>
+    <div class="legend"><span>OFF</span><span>ACC</span><span>IGN</span><span>READY</span></div>
+    <div style="height:12px"></div>
+    <button id="heaterBtn" class="btn big gray"><span class="icon">☀️</span>Diesel Heater</button>
+    <div id="heaterCtl" style="display:none">
+      <div class="row space" style="margin-top:10px">
+        <button id="heatMinus" class="btn gray" style="width:90px">−</button>
+        <span class="tag" id="heatLvlTag">Level: 0/9</span>
+        <button id="heatPlus" class="btn gray" style="width:90px">＋</button>
+      </div>
+      <div id="heatSegs" style="height:10px;background:#2a3246;border-radius:8px;display:flex;gap:4px;margin-top:10px"></div>
+    </div>
+    <div style="height:12px"></div>
+    <div class="hdr" style="font-size:16px">Doors</div>
+    <div class="slider" id="doorSlider" style="height:46px">
+      <div class="trkLabel lock">LOCK</div>
+      <div class="trkLabel unlock">UNLOCK</div>
+      <div class="knob" id="doorKnob" style="width:64px">🔑</div>
+    </div>
   </div>
-  
-  <div class="card">
-    ${historyHTML}
-    <button class="btn danger" onclick="clearHistory()" style="margin-top:16px">Clear History</button>
+  <div class="card vstatus">
+    <div class="hdr">Vehicle Status</div>
+    <div class="row space"><span>Engine:</span><span id="engBadge" class="badge">OFF</span></div>
+    <div class="row space"><span>Heater:</span><span id="heaterBadge" class="badge">OFF</span></div>
+  </div>
+  <div class="card sensors">
+    <div class="hdr">Sensors</div>
+    <div class="row space"><span>Interior Temp:</span><span id="intTemp" class="badge">--</span></div>
+    <div class="row space"><span>Heater Status:</span><span id="heaterStatus" class="badge">--</span></div>
+    <div class="row space"><span>Fuel Consumed:</span><span id="fuelTag" class="badge">--</span></div>
   </div>
 </div>
-
 <script>
-async function clearHistory() {
-  if(!confirm('Clear command history?')) return;
-  await fetch('/api/clear_history', {method: 'POST'});
-  location.reload();
+let state={engine:'OFF',heater:false,level:0};
+let pressT=0,holdTimer=null,tempIgn=false,beforeHold='OFF';
+const power=document.getElementById('power'), knob=document.getElementById('knob'), slider=document.getElementById('engSlider');
+const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
+const doorSlider=document.getElementById('doorSlider'), doorKnob=document.getElementById('doorKnob');
+
+function colorizePower(){
+  power.classList.remove('off','acc','ign','ready');
+  const s=state.engine;
+  if(s==='OFF')power.classList.add('off');
+  if(s==='ACC')power.classList.add('acc');
+  if(s==='IGN')power.classList.add('ign');
+  if(s==='READY')power.classList.add('ready');
 }
-setInterval(() => location.reload(), 10000);
+
+function setEngine(e){
+  fetch('/api/queue_cmd?cmd=ENGINE='+e+';').then(refresh);
+}
+
+function nearestSlot(px,w){
+  const slots=[0,0.333,0.666,1.0];
+  const rel=Math.min(1,Math.max(0,px/(w-70)));
+  let k=0,d=9;
+  for(let i=0;i<4;i++){
+    const dd=Math.abs(rel-slots[i]);
+    if(dd<d){d=dd;k=i;}
+  }
+  return k;
+}
+
+function slotToLabel(i){return ['OFF','ACC','IGN','READY'][i];}
+function labelToSlot(s){return {'OFF':0,'ACC':1,'IGN':2,'READY':3}[s]??0;}
+
+function moveKnob(label){
+  const w=slider.clientWidth;
+  const slots=[0,0.333,0.666,1.0];
+  const x=slots[labelToSlot(label)]*(w-70);
+  knob.style.left=Math.round(x)+'px';
+  knob.textContent=label;
+}
+
+function drawHeatSegs(n){
+  heatSegs.innerHTML='';
+  for(let i=1;i<=9;i++){
+    const d=document.createElement('div');
+    d.style.flex='1';
+    d.style.height='10px';
+    d.style.borderRadius='6px';
+    d.style.background='#3b4257';
+    d.style.opacity='0.45';
+    if(i<=n){
+      d.style.opacity='1';
+      d.style.background=(i<=3?'#2ecc71':(i<=6?'#f0b429':'#e74c3c'));
+    }
+    heatSegs.appendChild(d);
+  }
+}
+
+async function refresh() {
+  const r=await fetch('/api/state');
+  const js=await r.json();
+  state.engine=js.engine;
+  state.heater=js.heater;
+  state.level=js.level;
+  
+  document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
+  document.getElementById('intTemp').textContent='22°C';
+  document.getElementById('engBadge').textContent=state.engine;
+  
+  colorizePower();
+  moveKnob(state.engine);
+  
+  heaterBtn.className='btn big '+(state.heater?'green':'gray');
+  heaterCtl.style.display=state.heater?'block':'none';
+  document.getElementById('heatLvlTag').textContent='Level: '+state.level+'/9';
+  drawHeatSegs(state.level);
+  
+  const consumedMl = (js.cons||0)+' ml';
+  document.getElementById('heaterStatus').textContent='--';
+  document.getElementById('fuelTag').textContent=consumedMl;
+}
+
+function setHeater(on){
+  fetch('/api/queue_cmd?cmd=HEATER='+(on?1:0)+';').then(refresh);
+}
+
+function setHeaterLevel(lv){
+  fetch('/api/queue_cmd?cmd=LEVEL='+lv+';').then(refresh);
+}
+
+power.addEventListener('pointerdown',e=>{
+  beforeHold=state.engine;
+  pressT=Date.now();
+  clearTimeout(holdTimer);
+  tempIgn=false;
+  holdTimer=setTimeout(()=>{tempIgn=true;setEngine('IGN');},1000);
+});
+
+power.addEventListener('pointerup',e=>{
+  const dt=Date.now()-pressT;
+  clearTimeout(holdTimer);
+  if(dt<1000){
+    const next=(state.engine==='ACC')?'OFF':'ACC';
+    setEngine(next);
+  }else if(dt<3000){
+    if(tempIgn)setEngine(beforeHold);
+  }else{
+    setEngine('READY');
+  }
+});
+
+let drag=false,startX=0,startLeft=0;
+slider.addEventListener('pointerdown',e=>{
+  drag=true;
+  slider.setPointerCapture(e.pointerId);
+  startX=e.clientX;
+  startLeft=knob.offsetLeft;
+});
+
+slider.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const w=slider.clientWidth;
+  let x=startLeft+(e.clientX-startX);
+  x=Math.max(0,Math.min(w-70,x));
+  knob.style.left=x+'px';
+});
+
+slider.addEventListener('pointerup',e=>{
+  drag=false;
+  const w=slider.clientWidth;
+  const slot=nearestSlot(knob.offsetLeft,w);
+  const label=slotToLabel(slot);
+  moveKnob(label);
+  setEngine(label);
+});
+
+heaterBtn.addEventListener('click',()=>{setHeater(!state.heater);});
+
+document.getElementById('heatPlus').addEventListener('click',()=>{
+  let n=Math.min(9,state.level+1);
+  setHeaterLevel(n);
+});
+
+document.getElementById('heatMinus').addEventListener('click',()=>{
+  let n=Math.max(1,state.level-1);
+  setHeaterLevel(n);
+});
+
+let dDrag=false,dStartX=0,dStartLeft=0;
+
+function doorCenter(){
+  const w=doorSlider.clientWidth;
+  const x=(w-64)/2;
+  doorKnob.style.left=Math.round(x)+'px';
+}
+
+function doorDo(act){
+  fetch('/api/queue_cmd?cmd=DOOR='+act+';').then(()=>doorCenter());
+}
+
+doorCenter();
+
+doorSlider.addEventListener('pointerdown',e=>{
+  dDrag=true;
+  doorSlider.setPointerCapture(e.pointerId);
+  dStartX=e.clientX;
+  dStartLeft=doorKnob.offsetLeft;
+});
+
+doorSlider.addEventListener('pointermove',e=>{
+  if(!dDrag)return;
+  const w=doorSlider.clientWidth;
+  let x=dStartLeft+(e.clientX-dStartX);
+  x=Math.max(0,Math.min(w-64,x));
+  doorKnob.style.left=x+'px';
+});
+
+doorSlider.addEventListener('pointerup',e=>{
+  dDrag=false;
+  const w=doorSlider.clientWidth;
+  const center=(w-64)/2;
+  const x=doorKnob.offsetLeft;
+  const thr=w*0.15;
+  if (x < center - thr) doorDo('LOCK');
+  else if (x > center + thr) doorDo('UNLOCK');
+  else doorCenter();
+});
+
+refresh();
+setInterval(refresh,3000);
 </script>
 </body></html>
   `);
@@ -419,13 +314,6 @@ app.get('/api/cmd', (req, res) => {
     res.send('NONE');
   } else {
     const cmd = commandQueue.shift();
-    commandHistory.push({
-      command: cmd,
-      timestamp: Date.now(),
-      status: 'sent'
-    });
-    if (commandHistory.length > 20) commandHistory.shift();
-    
     console.log(`[${new Date().toISOString()}] ESP32 CMD: ${cmd}`);
     res.send(cmd);
   }
@@ -439,22 +327,6 @@ app.get('/api/queue_cmd', (req, res) => {
   }
   commandQueue.push(cmd);
   console.log(`[${new Date().toISOString()}] WEB CMD queued: ${cmd}`);
-  res.send('OK');
-});
-
-app.get('/api/queue_status', (req, res) => {
-  res.json({ count: commandQueue.length });
-});
-
-app.post('/api/clear_queue', (req, res) => {
-  commandQueue = [];
-  console.log(`[${new Date().toISOString()}] Queue cleared`);
-  res.send('OK');
-});
-
-app.post('/api/clear_history', (req, res) => {
-  commandHistory = [];
-  console.log(`[${new Date().toISOString()}] History cleared`);
   res.send('OK');
 });
 

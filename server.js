@@ -1,11 +1,12 @@
 // ============================================
-// Render Server — Peugeotion ESP32 + OTA + ACK + Sleep Timers
+// Render Server — Peugeotion ESP32 + Timers + NTP
 // ============================================
 
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const cron = require('node-cron');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -23,7 +24,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// Состояние ESP32 (это источник истины!)
+// Состояние ESP32
 let lastState = {
   engine: 'OFF',
   heater: 0,
@@ -36,8 +37,6 @@ let lastState = {
 };
 
 let commandQueue = [];
-
-// История выполненных команд (последние 100)
 let commandHistory = [];
 
 // Версии прошивок
@@ -48,14 +47,79 @@ let firmwareVersions = {
 
 // Настройки таймеров сна
 let sleepSettings = {
-  dayStart: 6,        // День начинается с 6:00
-  dayEnd: 20,         // День заканчивается в 20:00
-  dayInterval: 300,   // Днём просыпаться каждые 300 сек (5 мин)
-  nightInterval: 900  // Ночью просыпаться каждые 900 сек (15 мин)
+  dayStart: 6,
+  dayEnd: 20,
+  dayInterval: 300,
+  nightInterval: 900
 };
+
+// Настройки таймера прогрева
+let heaterSchedule = {
+  enabled: false,
+  hour: 7,
+  minute: 0,
+  heaterLevel: 5,
+  preHeatTime: 180,  // 3 минуты прогрева до включения READY
+  autoReady: true
+};
+
+let activeCronJob = null;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ============================================
+// ФУНКЦИЯ: Запуск прогрева по таймеру
+// ============================================
+
+function triggerHeaterSchedule() {
+  console.log(`[SCHEDULE] Heater timer triggered at ${new Date().toISOString()}`);
+  
+  // Шаг 1: Включаем отопитель
+  const heaterCmd = `HEATER=1;LEVEL=${heaterSchedule.heaterLevel};`;
+  commandQueue.push(heaterCmd);
+  console.log(`[SCHEDULE] Queued: ${heaterCmd}`);
+  
+  // Шаг 2: Через 2-3 минуты включаем ENGINE=READY (если включено)
+  if (heaterSchedule.autoReady) {
+    setTimeout(() => {
+      const readyCmd = 'ENGINE=READY;';
+      commandQueue.push(readyCmd);
+      console.log(`[SCHEDULE] Queued (after ${heaterSchedule.preHeatTime}s): ${readyCmd}`);
+    }, heaterSchedule.preHeatTime * 1000);
+  }
+}
+
+// ============================================
+// ФУНКЦИЯ: Обновление cron задачи
+// ============================================
+
+function updateCronJob() {
+  // Удаляем старую задачу
+  if (activeCronJob) {
+    activeCronJob.stop();
+    activeCronJob = null;
+  }
+  
+  if (!heaterSchedule.enabled) {
+    console.log('[CRON] Heater schedule disabled');
+    return;
+  }
+  
+  // Создаём новую задачу: "минута час * * *"
+  const cronExpr = `${heaterSchedule.minute} ${heaterSchedule.hour} * * *`;
+  
+  activeCronJob = cron.schedule(cronExpr, () => {
+    triggerHeaterSchedule();
+  }, {
+    timezone: "Europe/Oslo"  // Твой timezone (Норвегия)
+  });
+  
+  console.log(`[CRON] Heater scheduled: ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')} (${cronExpr})`);
+}
+
+// Инициализация cron при старте
+updateCronJob();
 
 // ============================================
 // ГЛАВНАЯ СТРАНИЦА
@@ -352,7 +416,7 @@ setInterval(refresh,3000);
 });
 
 // ============================================
-// СТРАНИЦА НАСТРОЕК С ТАЙМЕРАМИ СНА
+// СТРАНИЦА НАСТРОЕК (продолжение в след. части)
 // ============================================
 
 app.get('/config', (req, res) => {
@@ -386,6 +450,12 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 .log-status.error{color:#d84d4f}
 .time-row{display:flex;gap:12px;align-items:center}
 .time-input{width:80px}
+.toggle{position:relative;display:inline-block;width:50px;height:24px}
+.toggle input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#39425e;border-radius:24px;transition:0.3s}
+.toggle-slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:0.3s}
+.toggle input:checked + .toggle-slider{background:#32d583}
+.toggle input:checked + .toggle-slider:before{transform:translateX(26px)}
 </style></head><body>
 <div class="wrap">
   <div class="card">
@@ -394,6 +464,7 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div><strong>Platform:</strong> Render.com</div>
       <div style="margin-top:8px"><strong>ESP32 Connection:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
       <div style="margin-top:8px"><strong>Last Update:</strong> ${stateAge}s ago</div>
+      <div style="margin-top:8px"><strong>Server Time:</strong> <span id="serverTime">--:--:--</span></div>
     </div>
   </div>
   
@@ -401,6 +472,58 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <div class="hdr">Command Log</div>
     <div id="logWindow" class="log-window">
       <div style="color:#6b7280;text-align:center">Waiting for commands...</div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">🔥 Heater Auto-Start Timer</div>
+    
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <strong>Enable Timer</strong>
+      <label class="toggle">
+        <input type="checkbox" id="timerEnabled" ${heaterSchedule.enabled?'checked':''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    
+    <label>Start Time</label>
+    <div class="time-row">
+      <div style="flex:1">
+        <label style="margin:0;font-size:12px;color:#9aa3b2">Hour</label>
+        <input type="number" id="timerHour" class="input time-input" min="0" max="23" value="${heaterSchedule.hour}">
+      </div>
+      <div style="padding-top:20px">:</div>
+      <div style="flex:1">
+        <label style="margin:0;font-size:12px;color:#9aa3b2">Minute</label>
+        <input type="number" id="timerMinute" class="input time-input" min="0" max="59" value="${heaterSchedule.minute}">
+      </div>
+    </div>
+    
+    <label style="margin-top:16px">Heater Power Level</label>
+    <input type="number" id="timerLevel" class="input" min="1" max="9" value="${heaterSchedule.heaterLevel}">
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Power level 1-9</div>
+    
+    <label style="margin-top:16px">Pre-heat Time (seconds)</label>
+    <input type="number" id="preHeatTime" class="input" min="60" max="600" step="30" value="${heaterSchedule.preHeatTime}">
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">How long to warm up before starting engine (recommended: 180s / 3 min)</div>
+    
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+      <strong>Auto Engine READY</strong>
+      <label class="toggle">
+        <input type="checkbox" id="autoReady" ${heaterSchedule.autoReady?'checked':''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">After pre-heat time, automatically switch engine to READY mode</div>
+    
+    <div style="height:16px"></div>
+    <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
+    
+    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
+      <strong>ℹ️ How it works:</strong><br>
+      1. At specified time, heater turns ON<br>
+      2. After ${heaterSchedule.preHeatTime}s, engine switches to READY (if enabled)<br>
+      3. Car is warm and ready to drive!
     </div>
   </div>
   
@@ -436,13 +559,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <div style="height:16px"></div>
     <button class="btn primary" onclick="saveSleepSettings()">Save Sleep Settings</button>
-    
-    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ How it works:</strong><br>
-      • <strong>Day Time</strong>: ESP32 wakes up more frequently (e.g., every 5 min)<br>
-      • <strong>Night Time</strong>: ESP32 wakes up less frequently to save battery (e.g., every 15 min)<br>
-      • Settings are sent to ESP32 on next wake-up
-    </div>
   </div>
   
   <div class="card">
@@ -509,7 +625,51 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </div>
 
 <script>
-// ========== НАСТРОЙКИ ТАЙМЕРОВ СНА ==========
+// ========== ТАЙМЕР ПРОГРЕВА ==========
+
+async function saveHeaterSchedule() {
+  const enabled = document.getElementById('timerEnabled').checked;
+  const hour = parseInt(document.getElementById('timerHour').value);
+  const minute = parseInt(document.getElementById('timerMinute').value);
+  const level = parseInt(document.getElementById('timerLevel').value);
+  const preHeat = parseInt(document.getElementById('preHeatTime').value);
+  const autoReady = document.getElementById('autoReady').checked;
+  
+  if(hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    alert('Invalid time');
+    return;
+  }
+  
+  if(level < 1 || level > 9) {
+    alert('Heater level must be 1-9');
+    return;
+  }
+  
+  const settings = {
+    enabled: enabled,
+    hour: hour,
+    minute: minute,
+    heaterLevel: level,
+    preHeatTime: preHeat,
+    autoReady: autoReady
+  };
+  
+  const res = await fetch('/api/heater_schedule', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(settings)
+  });
+  
+  if(res.ok) {
+    alert('✓ Heater timer saved!\\n' + 
+          (enabled ? 'Timer will trigger at ' + hour + ':' + String(minute).padStart(2,'0') : 'Timer disabled'));
+    location.reload();
+  } else {
+    alert('✗ Failed to save');
+  }
+}
+
+// ========== НАСТРОЙКИ СНА ==========
 
 async function saveSleepSettings() {
   const dayStart = parseInt(document.getElementById('dayStart').value);
@@ -546,13 +706,13 @@ async function saveSleepSettings() {
   });
   
   if(res.ok) {
-    alert('✓ Sleep settings saved!\\nSettings will be sent to ESP32 on next wake-up.');
+    alert('✓ Sleep settings saved!');
   } else {
     alert('✗ Failed to save settings');
   }
 }
 
-// ========== КАЛИБРОВКА ТОПЛИВА ==========
+// ========== КАЛИБРОВКА ==========
 
 async function setMlPerTick() {
   const val = document.getElementById('mlPerTick').value;
@@ -595,7 +755,7 @@ async function enableAuto() {
   setTimeout(refresh, 1000);
 }
 
-// ========== ЛОГИ КОМАНД ==========
+// ========== ЛОГИ ==========
 
 let lastLogCount = 0;
 
@@ -642,7 +802,7 @@ async function loadLogs() {
   }
 }
 
-// ========== OTA ЗАГРУЗКА ==========
+// ========== OTA ==========
 
 document.getElementById('masterForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -661,10 +821,10 @@ document.getElementById('masterForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Master firmware uploaded!\\nUpdate command sent to ESP32.'); 
+      alert('✓ Master firmware uploaded!');
       location.reload(); 
     } else { 
-      alert('✗ Upload failed: ' + await res.text()); 
+      alert('✗ Upload failed'); 
       btn.disabled = false;
       btn.textContent = 'Upload Master Firmware';
     }
@@ -692,10 +852,10 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Slave firmware uploaded!\\nUpdate command sent to ESP32 Master.\\nSlave will connect to WiFi and update automatically.'); 
+      alert('✓ Slave firmware uploaded!'); 
       location.reload(); 
     } else { 
-      alert('✗ Upload failed: ' + await res.text()); 
+      alert('✗ Upload failed'); 
       btn.disabled = false;
       btn.textContent = 'Upload Slave Firmware';
     }
@@ -706,7 +866,7 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   }
 });
 
-// ========== ОБНОВЛЕНИЕ ДАННЫХ ==========
+// ========== ОБНОВЛЕНИЕ ==========
 
 async function refresh() {
   try {
@@ -724,10 +884,21 @@ async function refresh() {
   }
 }
 
+function updateServerTime() {
+  const now = new Date();
+  document.getElementById('serverTime').textContent = now.toLocaleString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
 loadLogs();
 refresh();
+updateServerTime();
 setInterval(loadLogs, 2000);
 setInterval(refresh, 5000);
+setInterval(updateServerTime, 1000);
 </script>
 </body></html>
   `);
@@ -737,7 +908,7 @@ setInterval(refresh, 5000);
 // API ENDPOINTS
 // ============================================
 
-// Получить текущее состояние ESP32
+// Получить текущее состояние
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
@@ -757,8 +928,19 @@ app.get('/api/update', (req, res) => {
     timestamp: Date.now()
   };
 
-  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}, batt=${batt}mV, tank=${tank}ml, cons=${cons}ml`);
+  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}`);
   res.send('OK');
+});
+
+// ESP32 запрашивает текущее время (для синхронизации)
+app.get('/api/time', (req, res) => {
+  const now = new Date();
+  res.json({
+    timestamp: Math.floor(now.getTime() / 1000),  // Unix timestamp
+    iso: now.toISOString(),
+    timezone: 'Europe/Oslo',
+    offset: 3600  // UTC+1 (зимнее время Норвегии)
+  });
 });
 
 // ESP32 запрашивает команды
@@ -788,14 +970,32 @@ app.post('/api/sleep_settings', (req, res) => {
   
   console.log(`[${new Date().toISOString()}] Sleep settings updated:`, sleepSettings);
   
-  // Добавляем команду для ESP32
   const cmd = `SLEEP_CFG=${sleepSettings.dayStart},${sleepSettings.dayEnd},${sleepSettings.dayInterval},${sleepSettings.nightInterval};`;
   commandQueue.push(cmd);
   
   res.send('OK');
 });
 
-// Веб-интерфейс добавляет команду в очередь
+// Сохранить настройки таймера прогрева
+app.post('/api/heater_schedule', (req, res) => {
+  const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
+  
+  if (enabled !== undefined) heaterSchedule.enabled = enabled;
+  if (hour !== undefined) heaterSchedule.hour = parseInt(hour);
+  if (minute !== undefined) heaterSchedule.minute = parseInt(minute);
+  if (heaterLevel !== undefined) heaterSchedule.heaterLevel = parseInt(heaterLevel);
+  if (preHeatTime !== undefined) heaterSchedule.preHeatTime = parseInt(preHeatTime);
+  if (autoReady !== undefined) heaterSchedule.autoReady = autoReady;
+  
+  console.log(`[${new Date().toISOString()}] Heater schedule updated:`, heaterSchedule);
+  
+  // Обновляем cron задачу
+  updateCronJob();
+  
+  res.send('OK');
+});
+
+// Веб добавляет команду
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;
   if (!cmd) {
@@ -803,15 +1003,14 @@ app.get('/api/queue_cmd', (req, res) => {
   }
   
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd} (queue: ${commandQueue.length})`);
+  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
   
-  // Применяем команду сразу к состоянию сервера
   applyCommandToState(cmd);
   
   res.send('OK');
 });
 
-// ESP32 отправляет подтверждение выполнения команды
+// ESP32 отправляет ACK
 app.get('/api/ack', (req, res) => {
   const { cmd, status } = req.query;
   
@@ -825,7 +1024,6 @@ app.get('/api/ack', (req, res) => {
     timestamp: new Date().toISOString()
   };
   
-  // Добавляем в историю (последние 100 команд)
   commandHistory.unshift(ack);
   if (commandHistory.length > 100) commandHistory.pop();
   
@@ -834,12 +1032,12 @@ app.get('/api/ack', (req, res) => {
   res.send('OK');
 });
 
-// Получить историю команд
+// История команд
 app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
 
-// Применить команду к состоянию сервера (для мгновенного отображения)
+// Применить команду к состоянию
 function applyCommandToState(cmdLine) {
   const parts = cmdLine.split(';');
   parts.forEach(part => {
@@ -863,11 +1061,11 @@ function applyCommandToState(cmdLine) {
   lastState.timestamp = Date.now();
 }
 
-// Очистить очередь команд
+// Очистить очередь
 app.post('/api/clear_queue', (req, res) => {
   const cleared = commandQueue.length;
   commandQueue = [];
-  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared} commands removed)`);
+  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared} commands)`);
   res.send('OK');
 });
 
@@ -875,7 +1073,6 @@ app.post('/api/clear_queue', (req, res) => {
 // OTA ENDPOINTS
 // ============================================
 
-// Загрузка прошивки MASTER
 app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
@@ -887,16 +1084,13 @@ app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Master firmware uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  console.log(`[OTA] Master uploaded: ${req.file.filename} v${req.body.version}`);
   
-  // Автоматически добавляем команду обновления в очередь
   commandQueue.push('MASTER_UPDATE=' + req.body.version + ';');
-  console.log(`[OTA] Added MASTER_UPDATE command to queue`);
   
   res.send('OK');
 });
 
-// Загрузка прошивки SLAVE
 app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
@@ -908,26 +1102,21 @@ app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Slave firmware uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  console.log(`[OTA] Slave uploaded: ${req.file.filename} v${req.body.version}`);
   
-  // Автоматически добавляем команду обновления в очередь
   commandQueue.push('SLAVE_UPDATE=' + req.body.version + ';');
-  console.log(`[OTA] Added SLAVE_UPDATE command to queue`);
   
   res.send('OK');
 });
 
-// ESP32 проверяет версию MASTER
 app.get('/api/ota/version/master', (req, res) => {
   res.json({ version: firmwareVersions.master.version });
 });
 
-// ESP32 проверяет версию SLAVE
 app.get('/api/ota/version/slave', (req, res) => {
   res.json({ version: firmwareVersions.slave.version });
 });
 
-// ESP32 MASTER скачивает прошивку
 app.get('/api/ota/firmware/master', (req, res) => {
   if (!firmwareVersions.master.file) {
     return res.status(404).send('No firmware available');
@@ -936,11 +1125,10 @@ app.get('/api/ota/firmware/master', (req, res) => {
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('Firmware file not found');
   }
-  console.log(`[OTA] Master firmware download started: ${firmwareVersions.master.file}`);
+  console.log(`[OTA] Master download: ${firmwareVersions.master.file}`);
   res.download(filePath);
 });
 
-// ESP32 SLAVE скачивает прошивку
 app.get('/api/ota/firmware/slave', (req, res) => {
   if (!firmwareVersions.slave.file) {
     return res.status(404).send('No firmware available');
@@ -949,12 +1137,12 @@ app.get('/api/ota/firmware/slave', (req, res) => {
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('Firmware file not found');
   }
-  console.log(`[OTA] Slave firmware download started: ${firmwareVersions.slave.file}`);
+  console.log(`[OTA] Slave download: ${firmwareVersions.slave.file}`);
   res.download(filePath);
 });
 
 // ============================================
-// ЗАПУСК СЕРВЕРА
+// ЗАПУСК
 // ============================================
 
 app.listen(port, () => {
@@ -964,16 +1152,11 @@ app.listen(port, () => {
   console.log(`📍 Port: ${port}`);
   console.log(`🌐 URL: https://peugeotion.onrender.com`);
   console.log(`📡 ESP32 Endpoints:`);
-  console.log(`   - GET  /api/update        (ESP32 sends state)`);
-  console.log(`   - GET  /api/cmd           (ESP32 gets commands)`);
-  console.log(`   - GET  /api/ack           (ESP32 confirms command)`);
-  console.log(`   - GET  /api/sleep_config  (ESP32 gets sleep settings)`);
-  console.log(`🔄 OTA Endpoints:`);
-  console.log(`   - POST /api/ota/upload/master`);
-  console.log(`   - POST /api/ota/upload/slave`);
-  console.log(`   - GET  /api/ota/version/master`);
-  console.log(`   - GET  /api/ota/version/slave`);
-  console.log(`   - GET  /api/ota/firmware/master`);
-  console.log(`   - GET  /api/ota/firmware/slave`);
+  console.log(`   - GET  /api/update        (state)`);
+  console.log(`   - GET  /api/cmd           (commands)`);
+  console.log(`   - GET  /api/time          (time sync)`);
+  console.log(`   - GET  /api/ack           (confirm)`);
+  console.log(`   - GET  /api/sleep_config  (sleep)`);
+  console.log(`🔥 Heater Schedule: ${heaterSchedule.enabled ? `ON at ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')}` : 'DISABLED'}`);
   console.log(`${'='.repeat(50)}\n`);
 });

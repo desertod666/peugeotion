@@ -46,7 +46,9 @@ let firmwareVersions = {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ---------- ГЛАВНАЯ СТРАНИЦА ----------
+// ============================================
+// ГЛАВНАЯ СТРАНИЦА
+// ============================================
 
 app.get('/', (req, res) => {
   res.send(`
@@ -341,7 +343,9 @@ setInterval(refresh,5000);
   `);
 });
 
-// ---------- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ----------
+// ============================================
+// СТРАНИЦА НАСТРОЕК
+// ============================================
 
 app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
@@ -378,23 +382,31 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
   <div class="card">
     <div class="hdr">OTA Firmware Updates</div>
     <div style="margin:12px 0">
-      <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '✓' : '(no firmware)'}</div>
-      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '✓' : '(no firmware)'}</div>
+      <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '✓ '+firmwareVersions.master.file : '(no firmware)'}</div>
+      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '✓ '+firmwareVersions.slave.file : '(no firmware)'}</div>
     </div>
     
     <label>Upload Master Firmware (.bin)</label>
     <form id="masterForm" enctype="multipart/form-data">
-      <input type="file" id="masterFile" accept=".bin" class="input">
-      <input type="text" id="masterVer" class="input" placeholder="Version (e.g. 1.0.1)">
-      <button type="submit" class="btn primary">Upload Master</button>
+      <input type="file" id="masterFile" accept=".bin" class="input" required>
+      <input type="text" id="masterVer" class="input" placeholder="Version (e.g. 1.0.1)" required>
+      <button type="submit" class="btn primary">Upload Master Firmware</button>
     </form>
     
     <label style="margin-top:16px">Upload Slave Firmware (.bin)</label>
     <form id="slaveForm" enctype="multipart/form-data">
-      <input type="file" id="slaveFile" accept=".bin" class="input">
-      <input type="text" id="slaveVer" class="input" placeholder="Version (e.g. 1.0.1)">
-      <button type="submit" class="btn primary">Upload Slave</button>
+      <input type="file" id="slaveFile" accept=".bin" class="input" required>
+      <input type="text" id="slaveVer" class="input" placeholder="Version (e.g. 1.0.1)" required>
+      <button type="submit" class="btn primary">Upload Slave Firmware</button>
     </form>
+    
+    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
+      <strong>ℹ️ How it works:</strong><br>
+      • Upload .bin file and version<br>
+      • Server automatically sends update command to ESP32<br>
+      • Master updates itself directly<br>
+      • Slave connects to WiFi, updates, then returns to UART mode
+    </div>
   </div>
   
   <div class="card">
@@ -405,6 +417,7 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
       <div style="margin-top:8px"><strong>Fuel Tank:</strong> <span id="tank">${lastState.tank} ml</span></div>
       <div style="margin-top:8px"><strong>Consumed:</strong> <span id="cons">${lastState.cons} ml</span></div>
+      <div style="margin-top:8px"><strong>Sequence:</strong> #${lastState.seq}</div>
     </div>
   </div>
   
@@ -424,34 +437,67 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 document.getElementById('masterForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('masterFile').files[0];
-  const ver = document.getElementById('masterVer').value;
+  const ver = document.getElementById('masterVer').value.trim();
   if(!file || !ver) { alert('Please select file and enter version'); return; }
+  
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
   
   const formData = new FormData();
   formData.append('firmware', file);
   formData.append('version', ver);
   
-  const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
-  if(res.ok) { alert('Master firmware uploaded!'); location.reload(); }
-  else { alert('Upload failed: ' + await res.text()); }
+  try {
+    const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
+    if(res.ok) { 
+      alert('✓ Master firmware uploaded!\\nUpdate command sent to ESP32.'); 
+      location.reload(); 
+    } else { 
+      alert('✗ Upload failed: ' + await res.text()); 
+      btn.disabled = false;
+      btn.textContent = 'Upload Master Firmware';
+    }
+  } catch(err) {
+    alert('✗ Error: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = 'Upload Master Firmware';
+  }
 });
 
 document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('slaveFile').files[0];
-  const ver = document.getElementById('slaveVer').value;
+  const ver = document.getElementById('slaveVer').value.trim();
   if(!file || !ver) { alert('Please select file and enter version'); return; }
+  
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
   
   const formData = new FormData();
   formData.append('firmware', file);
   formData.append('version', ver);
   
-  const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
-  if(res.ok) { alert('Slave firmware uploaded!'); location.reload(); }
-  else { alert('Upload failed: ' + await res.text()); }
+  try {
+    const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
+    if(res.ok) { 
+      alert('✓ Slave firmware uploaded!\\nUpdate command sent to ESP32 Master.\\nSlave will connect to WiFi and update automatically.'); 
+      location.reload(); 
+    } else { 
+      alert('✗ Upload failed: ' + await res.text()); 
+      btn.disabled = false;
+      btn.textContent = 'Upload Slave Firmware';
+    }
+  } catch(err) {
+    alert('✗ Error: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = 'Upload Slave Firmware';
+  }
 });
 
 async function clearQueue() {
+  if(!confirm('Clear all queued commands?')) return;
   await fetch('/api/clear_queue', {method: 'POST'});
   location.reload();
 }
@@ -470,10 +516,16 @@ setInterval(() => {
   `);
 });
 
+// ============================================
+// API ENDPOINTS
+// ============================================
+
+// Получить текущее состояние ESP32
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
 
+// ESP32 отправляет обновление состояния
 app.get('/api/update', (req, res) => {
   const { engine, heater, level, batt, tank, cons, seq } = req.query;
   
@@ -488,10 +540,11 @@ app.get('/api/update', (req, res) => {
     timestamp: Date.now()
   };
 
-  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, batt=${batt}mV`);
+  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}, batt=${batt}mV, tank=${tank}ml, cons=${cons}ml`);
   res.send('OK');
 });
 
+// ESP32 запрашивает команды
 app.get('/api/cmd', (req, res) => {
   if (commandQueue.length === 0) {
     res.send('NONE');
@@ -502,78 +555,126 @@ app.get('/api/cmd', (req, res) => {
   }
 });
 
+// Веб-интерфейс добавляет команду в очередь
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;
   if (!cmd) {
-    res.status(400).send('Missing cmd parameter');
-    return;
+    return res.status(400).send('Missing cmd parameter');
   }
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
+  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd} (queue: ${commandQueue.length})`);
   res.send('OK');
 });
 
+// Очистить очередь команд
 app.post('/api/clear_queue', (req, res) => {
+  const cleared = commandQueue.length;
   commandQueue = [];
-  console.log(`[${new Date().toISOString()}] Queue cleared`);
+  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared} commands removed)`);
   res.send('OK');
 });
 
+// ============================================
+// OTA ENDPOINTS
+// ============================================
+
+// Загрузка прошивки MASTER
 app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
   }
+  
   firmwareVersions.master = {
     version: req.body.version,
     file: req.file.filename,
     uploaded: new Date().toISOString()
   };
-  console.log(`[OTA] Master firmware uploaded: ${req.file.filename} v${req.body.version}`);
+  
+  console.log(`[OTA] Master firmware uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  
+  // Автоматически добавляем команду обновления в очередь
+  commandQueue.push('MASTER_UPDATE=' + req.body.version + ';');
+  console.log(`[OTA] Added MASTER_UPDATE command to queue`);
+  
   res.send('OK');
 });
 
+// Загрузка прошивки SLAVE
 app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
   }
+  
   firmwareVersions.slave = {
     version: req.body.version,
     file: req.file.filename,
     uploaded: new Date().toISOString()
   };
-  console.log(`[OTA] Slave firmware uploaded: ${req.file.filename} v${req.body.version}`);
+  
+  console.log(`[OTA] Slave firmware uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  
+  // Автоматически добавляем команду обновления в очередь
+  commandQueue.push('SLAVE_UPDATE=' + req.body.version + ';');
+  console.log(`[OTA] Added SLAVE_UPDATE command to queue`);
+  
   res.send('OK');
 });
 
+// ESP32 проверяет версию MASTER
 app.get('/api/ota/version/master', (req, res) => {
   res.json({ version: firmwareVersions.master.version });
 });
 
+// ESP32 проверяет версию SLAVE
 app.get('/api/ota/version/slave', (req, res) => {
   res.json({ version: firmwareVersions.slave.version });
 });
 
+// ESP32 MASTER скачивает прошивку
 app.get('/api/ota/firmware/master', (req, res) => {
   if (!firmwareVersions.master.file) {
     return res.status(404).send('No firmware available');
   }
   const filePath = path.join(__dirname, 'firmware', firmwareVersions.master.file);
-  console.log(`[OTA] Master firmware download: ${firmwareVersions.master.file}`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Firmware file not found');
+  }
+  console.log(`[OTA] Master firmware download started: ${firmwareVersions.master.file}`);
   res.download(filePath);
 });
 
+// ESP32 SLAVE скачивает прошивку
 app.get('/api/ota/firmware/slave', (req, res) => {
   if (!firmwareVersions.slave.file) {
     return res.status(404).send('No firmware available');
   }
   const filePath = path.join(__dirname, 'firmware', firmwareVersions.slave.file);
-  console.log(`[OTA] Slave firmware download: ${firmwareVersions.slave.file}`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Firmware file not found');
+  }
+  console.log(`[OTA] Slave firmware download started: ${firmwareVersions.slave.file}`);
   res.download(filePath);
 });
 
+// ============================================
+// ЗАПУСК СЕРВЕРА
+// ============================================
+
 app.listen(port, () => {
-  console.log(`🚗 Peugeotion server running on port ${port}`);
-  console.log(`👉 https://peugeotion.onrender.com`);
-  console.log(`📡 ESP32 endpoints: /api/update, /api/cmd`);
-  console.log(`🔄 OTA endpoints: /api/ota/*`);
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`🚗 Peugeotion Server Started`);
+  console.log(`${'='.repeat(50)}`);
+  console.log(`📍 Port: ${port}`);
+  console.log(`🌐 URL: https://peugeotion.onrender.com`);
+  console.log(`📡 ESP32 Endpoints:`);
+  console.log(`   - GET  /api/update    (ESP32 sends state)`);
+  console.log(`   - GET  /api/cmd       (ESP32 gets commands)`);
+  console.log(`🔄 OTA Endpoints:`);
+  console.log(`   - POST /api/ota/upload/master`);
+  console.log(`   - POST /api/ota/upload/slave`);
+  console.log(`   - GET  /api/ota/version/master`);
+  console.log(`   - GET  /api/ota/version/slave`);
+  console.log(`   - GET  /api/ota/firmware/master`);
+  console.log(`   - GET  /api/ota/firmware/slave`);
+  console.log(`${'='.repeat(50)}\n`);
 });

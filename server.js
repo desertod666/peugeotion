@@ -83,7 +83,6 @@ async function uploadToGitHub(filename, fileBuffer) {
   }
   
   try {
-    // Получаем текущий SHA файла (если существует)
     const getFileOptions = {
       hostname: 'api.github.com',
       path: `/repos/${GITHUB_REPO}/contents/firmware/${filename}`,
@@ -114,7 +113,6 @@ async function uploadToGitHub(filename, fileBuffer) {
       req.end();
     });
     
-    // Загружаем файл
     const content = fileBuffer.toString('base64');
     
     const uploadData = JSON.stringify({
@@ -202,7 +200,6 @@ function loadFirmwareFromDirectory() {
   
   files.forEach(file => {
     if (file.endsWith('.bin')) {
-      // Парсим имя файла: master_v1.0.1.bin или slave_v1.0.0.bin
       const match = file.match(/(master|slave)_v([\d.]+)\.bin/i);
       
       if (match) {
@@ -402,6 +399,26 @@ const power=document.getElementById('power'), knob=document.getElementById('knob
 const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
 const doorSlider=document.getElementById('doorSlider'), doorKnob=document.getElementById('doorKnob');
 
+// ============================================
+// DEBOUNCING — только для отопителя!
+// ============================================
+
+let heaterDebounceTimer = null;
+
+function debounceHeater(cmd) {
+  if (heaterDebounceTimer) {
+    clearTimeout(heaterDebounceTimer);
+  }
+  heaterDebounceTimer = setTimeout(() => {
+    fetch('/api/queue_cmd?cmd='+cmd);
+    console.log('Sent to server:', cmd);
+  }, 2000);
+}
+
+// ============================================
+// UI FUNCTIONS
+// ============================================
+
 function colorizePower(){
   power.classList.remove('off','acc','ign','ready');
   const s=state.engine;
@@ -409,10 +426,6 @@ function colorizePower(){
   if(s==='ACC')power.classList.add('acc');
   if(s==='IGN')power.classList.add('ign');
   if(s==='READY')power.classList.add('ready');
-}
-
-function setEngine(e){
-  fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
 }
 
 function nearestSlot(px,w){
@@ -467,6 +480,10 @@ function updateUI(){
   drawHeatSegs(state.level);
 }
 
+// ============================================
+// SERVER SYNC
+// ============================================
+
 async function refresh() {
   try {
     const r=await fetch('/api/state');
@@ -486,16 +503,62 @@ async function refresh() {
   }
 }
 
+// ============================================
+// ENGINE CONTROL (МГНОВЕННО!)
+// ============================================
+
+function setEngine(e){
+  state.engine = e;
+  updateUI();
+  fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
+}
+
+// ============================================
+// HEATER CONTROL (С ЗАДЕРЖКОЙ 2 СЕК)
+// ============================================
+
 function setHeater(on){
-  const cmd = on ? 'HEATER=1;LEVEL=1;' : 'HEATER=0;';
-  fetch('/api/queue_cmd?cmd='+cmd);
+  if(on) {
+    state.heater = 1;
+    if(state.level === 0) state.level = 1;
+  } else {
+    state.heater = 0;
+  }
+  updateUI();
+  
+  const cmd = on ? 'HEATER=1;LEVEL='+state.level+';' : 'HEATER=0;';
+  debounceHeater(cmd);
 }
 
 function setHeaterLevel(lv){
   if(lv<1) lv=1;
   if(lv>9) lv=9;
-  fetch('/api/queue_cmd?cmd=LEVEL='+lv+';');
+  
+  state.level = lv;
+  if(state.heater === 0) state.heater = 1;
+  updateUI();
+  
+  debounceHeater('LEVEL='+lv+';');
 }
+
+// ============================================
+// DOOR CONTROL (МГНОВЕННО!)
+// ============================================
+
+function doorCenter(){
+  const w=doorSlider.clientWidth;
+  const x=(w-64)/2;
+  doorKnob.style.left=Math.round(x)+'px';
+}
+
+function doorDo(act){
+  fetch('/api/queue_cmd?cmd=DOOR='+act+';');
+  setTimeout(doorCenter, 300);
+}
+
+// ============================================
+// POWER BUTTON (LONG PRESS)
+// ============================================
 
 power.addEventListener('pointerdown',e=>{
   e.preventDefault();
@@ -522,6 +585,10 @@ power.addEventListener('pointerup',e=>{
     setEngine('READY');
   }
 });
+
+// ============================================
+// ENGINE SLIDER
+// ============================================
 
 let drag=false,startX=0,startLeft=0;
 slider.addEventListener('pointerdown',e=>{
@@ -551,6 +618,10 @@ slider.addEventListener('pointerup',e=>{
   setEngine(label);
 });
 
+// ============================================
+// HEATER BUTTONS
+// ============================================
+
 heaterBtn.addEventListener('click',e=>{
   e.preventDefault();
   setHeater(!state.heater);
@@ -568,18 +639,11 @@ document.getElementById('heatMinus').addEventListener('click',e=>{
   setHeaterLevel(n);
 });
 
+// ============================================
+// DOOR SLIDER
+// ============================================
+
 let dDrag=false,dStartX=0,dStartLeft=0;
-
-function doorCenter(){
-  const w=doorSlider.clientWidth;
-  const x=(w-64)/2;
-  doorKnob.style.left=Math.round(x)+'px';
-}
-
-function doorDo(act){
-  fetch('/api/queue_cmd?cmd=DOOR='+act+';');
-  setTimeout(doorCenter, 300);
-}
 
 doorCenter();
 
@@ -613,9 +677,13 @@ doorSlider.addEventListener('pointerup',e=>{
   else doorCenter();
 });
 
+// ============================================
+// INIT
+// ============================================
+
 updateUI();
 refresh();
-setInterval(refresh,3000);
+setInterval(refresh,5000);
 </script>
 </body></html>
   `);
@@ -894,7 +962,7 @@ async function setMlPerTick() {
   if(!val || val <= 0) { alert('Enter valid ml/tick'); return; }
   await fetch('/api/queue_cmd?cmd=MLPT='+val+';');
   alert('✓ Queued');
-  setTimeout(refresh, 1000);
+  refresh();
 }
 
 async function sendRefill() {
@@ -903,21 +971,21 @@ async function sendRefill() {
   await fetch('/api/queue_cmd?cmd=REFILLED='+val+';');
   alert('✓ Refilled: ' + val + ' ml');
   document.getElementById('refilledMl').value = '';
-  setTimeout(refresh, 1000);
+  refresh();
 }
 
 async function resetCalib() {
   if(!confirm('Reset?')) return;
   await fetch('/api/queue_cmd?cmd=RESET_CALIB=1;');
   alert('✓ Reset queued');
-  setTimeout(refresh, 1000);
+  refresh();
 }
 
 async function enableAuto() {
   if(!confirm('Enable auto?')) return;
   await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
   alert('✓ Auto queued');
-  setTimeout(refresh, 1000);
+  refresh();
 }
 
 let lastLogCount = 0;
@@ -1240,7 +1308,6 @@ app.post('/api/ota/upload/master', upload.single('firmware'), async (req, res) =
   const filename = `master_v${req.body.version}.bin`;
   const newPath = path.join(__dirname, 'firmware', filename);
   
-  // Переименовываем файл
   fs.renameSync(req.file.path, newPath);
   
   firmwareVersions.master = {
@@ -1251,7 +1318,6 @@ app.post('/api/ota/upload/master', upload.single('firmware'), async (req, res) =
   
   console.log(`[OTA] Master uploaded: ${filename} (${req.file.size} bytes)`);
   
-  // Загружаем в GitHub
   const fileBuffer = fs.readFileSync(newPath);
   const githubSuccess = await uploadToGitHub(filename, fileBuffer);
   
@@ -1272,7 +1338,6 @@ app.post('/api/ota/upload/slave', upload.single('firmware'), async (req, res) =>
   const filename = `slave_v${req.body.version}.bin`;
   const newPath = path.join(__dirname, 'firmware', filename);
   
-  // Переименовываем файл
   fs.renameSync(req.file.path, newPath);
   
   firmwareVersions.slave = {
@@ -1283,7 +1348,6 @@ app.post('/api/ota/upload/slave', upload.single('firmware'), async (req, res) =>
   
   console.log(`[OTA] Slave uploaded: ${filename} (${req.file.size} bytes)`);
   
-  // Загружаем в GitHub
   const fileBuffer = fs.readFileSync(newPath);
   const githubSuccess = await uploadToGitHub(filename, fileBuffer);
   
@@ -1331,7 +1395,6 @@ app.get('/api/ota/firmware/slave', (req, res) => {
 // ============================================
 
 app.listen(port, () => {
-  // Загружаем прошивки из папки firmware/
   loadFirmwareFromDirectory();
   
   console.log(`\n${'='.repeat(60)}`);

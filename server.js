@@ -1,5 +1,5 @@
 // ============================================
-// Render Server — Peugeotion ESP32 + OTA
+// Render Server — Peugeotion ESP32 + OTA + ACK + Sleep Timers
 // ============================================
 
 const express = require('express');
@@ -37,10 +37,21 @@ let lastState = {
 
 let commandQueue = [];
 
+// История выполненных команд (последние 100)
+let commandHistory = [];
+
 // Версии прошивок
 let firmwareVersions = {
   master: { version: '1.0.0', file: '', uploaded: null },
   slave: { version: '1.0.0', file: '', uploaded: null }
+};
+
+// Настройки таймеров сна
+let sleepSettings = {
+  dayStart: 6,        // День начинается с 6:00
+  dayEnd: 20,         // День заканчивается в 20:00
+  dayInterval: 300,   // Днём просыпаться каждые 300 сек (5 мин)
+  nightInterval: 900  // Ночью просыпаться каждые 900 сек (15 мин)
 };
 
 app.use(express.json());
@@ -341,7 +352,7 @@ setInterval(refresh,3000);
 });
 
 // ============================================
-// СТРАНИЦА НАСТРОЕК
+// СТРАНИЦА НАСТРОЕК С ТАЙМЕРАМИ СНА
 // ============================================
 
 app.get('/config', (req, res) => {
@@ -362,6 +373,19 @@ app.get('/config', (req, res) => {
 .input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0;box-sizing:border-box}
 .online{color:#32d583}.offline{color:#d84d4f}
 label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
+.log-window{background:#0a0e14;border:1px solid #2a3246;border-radius:8px;padding:12px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.6}
+.log-window::-webkit-scrollbar{width:8px}
+.log-window::-webkit-scrollbar-track{background:#1c2333;border-radius:4px}
+.log-window::-webkit-scrollbar-thumb{background:#39425e;border-radius:4px}
+.log-window::-webkit-scrollbar-thumb:hover{background:#4a5568}
+.log-entry{margin:4px 0;display:flex;gap:10px;align-items:center}
+.log-time{color:#6b7280;font-size:11px;min-width:80px}
+.log-cmd{color:#9aa3b2;flex:1}
+.log-status{font-weight:700;min-width:45px;text-align:right}
+.log-status.ok{color:#32d583}
+.log-status.error{color:#d84d4f}
+.time-row{display:flex;gap:12px;align-items:center}
+.time-input{width:80px}
 </style></head><body>
 <div class="wrap">
   <div class="card">
@@ -370,6 +394,54 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div><strong>Platform:</strong> Render.com</div>
       <div style="margin-top:8px"><strong>ESP32 Connection:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
       <div style="margin-top:8px"><strong>Last Update:</strong> ${stateAge}s ago</div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">Command Log</div>
+    <div id="logWindow" class="log-window">
+      <div style="color:#6b7280;text-align:center">Waiting for commands...</div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">⏰ Sleep Timer Settings</div>
+    
+    <label>Day Time Period</label>
+    <div class="time-row">
+      <div style="flex:1">
+        <label style="margin:0;font-size:12px;color:#9aa3b2">Start (hour)</label>
+        <input type="number" id="dayStart" class="input time-input" min="0" max="23" value="${sleepSettings.dayStart}">
+      </div>
+      <div style="padding-top:20px">to</div>
+      <div style="flex:1">
+        <label style="margin:0;font-size:12px;color:#9aa3b2">End (hour)</label>
+        <input type="number" id="dayEnd" class="input time-input" min="0" max="23" value="${sleepSettings.dayEnd}">
+      </div>
+    </div>
+    
+    <label style="margin-top:16px">Wake Interval (Day)</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="dayInterval" class="input" style="flex:1" min="60" max="3600" step="60" value="${sleepSettings.dayInterval}">
+      <span style="color:#9aa3b2;font-size:14px">seconds</span>
+    </div>
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Current: ${Math.floor(sleepSettings.dayInterval/60)} minutes</div>
+    
+    <label style="margin-top:16px">Wake Interval (Night)</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="nightInterval" class="input" style="flex:1" min="60" max="3600" step="60" value="${sleepSettings.nightInterval}">
+      <span style="color:#9aa3b2;font-size:14px">seconds</span>
+    </div>
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Current: ${Math.floor(sleepSettings.nightInterval/60)} minutes</div>
+    
+    <div style="height:16px"></div>
+    <button class="btn primary" onclick="saveSleepSettings()">Save Sleep Settings</button>
+    
+    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
+      <strong>ℹ️ How it works:</strong><br>
+      • <strong>Day Time</strong>: ESP32 wakes up more frequently (e.g., every 5 min)<br>
+      • <strong>Night Time</strong>: ESP32 wakes up less frequently to save battery (e.g., every 15 min)<br>
+      • Settings are sent to ESP32 on next wake-up
     </div>
   </div>
   
@@ -400,14 +472,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <button class="btn danger" onclick="resetCalib()">Reset Calibration</button>
     <button class="btn" onclick="enableAuto()">Enable Auto Mode</button>
-    
-    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ Calibration:</strong><br>
-      • <strong>ml/tick</strong>: Set flow rate (adjust based on real consumption)<br>
-      • <strong>Refilled</strong>: After filling tank, enter amount to update level<br>
-      • <strong>Reset</strong>: Clears all calibration data and consumption history<br>
-      • <strong>Auto Mode</strong>: Enables automatic heater control
-    </div>
   </div>
   
   <div class="card">
@@ -445,6 +509,49 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </div>
 
 <script>
+// ========== НАСТРОЙКИ ТАЙМЕРОВ СНА ==========
+
+async function saveSleepSettings() {
+  const dayStart = parseInt(document.getElementById('dayStart').value);
+  const dayEnd = parseInt(document.getElementById('dayEnd').value);
+  const dayInterval = parseInt(document.getElementById('dayInterval').value);
+  const nightInterval = parseInt(document.getElementById('nightInterval').value);
+  
+  if(dayStart < 0 || dayStart > 23 || dayEnd < 0 || dayEnd > 23) {
+    alert('Hour must be between 0 and 23');
+    return;
+  }
+  
+  if(dayStart >= dayEnd) {
+    alert('Day start must be before day end');
+    return;
+  }
+  
+  if(dayInterval < 60 || nightInterval < 60) {
+    alert('Wake interval must be at least 60 seconds');
+    return;
+  }
+  
+  const settings = {
+    dayStart: dayStart,
+    dayEnd: dayEnd,
+    dayInterval: dayInterval,
+    nightInterval: nightInterval
+  };
+  
+  const res = await fetch('/api/sleep_settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(settings)
+  });
+  
+  if(res.ok) {
+    alert('✓ Sleep settings saved!\\nSettings will be sent to ESP32 on next wake-up.');
+  } else {
+    alert('✗ Failed to save settings');
+  }
+}
+
 // ========== КАЛИБРОВКА ТОПЛИВА ==========
 
 async function setMlPerTick() {
@@ -486,6 +593,53 @@ async function enableAuto() {
   await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
   alert('✓ Auto mode command queued');
   setTimeout(refresh, 1000);
+}
+
+// ========== ЛОГИ КОМАНД ==========
+
+let lastLogCount = 0;
+
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/history');
+    const history = await r.json();
+    
+    const logWindow = document.getElementById('logWindow');
+    
+    if (history.length === 0) {
+      logWindow.innerHTML = '<div style="color:#6b7280;text-align:center">Waiting for commands...</div>';
+      return;
+    }
+    
+    const shouldScroll = history.length > lastLogCount;
+    lastLogCount = history.length;
+    
+    let html = '';
+    history.slice(0, 50).forEach(item => {
+      const time = new Date(item.timestamp).toLocaleString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      
+      const statusClass = item.status === 'OK' ? 'ok' : 'error';
+      const statusIcon = item.status === 'OK' ? '✓' : '✗';
+      
+      html += '<div class="log-entry">';
+      html += '<span class="log-time">' + time + '</span>';
+      html += '<span class="log-cmd">' + item.command + '</span>';
+      html += '<span class="log-status ' + statusClass + '">' + statusIcon + ' ' + item.status + '</span>';
+      html += '</div>';
+    });
+    
+    logWindow.innerHTML = html;
+    
+    if (shouldScroll) {
+      logWindow.scrollTop = logWindow.scrollHeight;
+    }
+  } catch(e) {
+    console.error('Log load error:', e);
+  }
 }
 
 // ========== OTA ЗАГРУЗКА ==========
@@ -570,7 +724,9 @@ async function refresh() {
   }
 }
 
+loadLogs();
 refresh();
+setInterval(loadLogs, 2000);
 setInterval(refresh, 5000);
 </script>
 </body></html>
@@ -616,6 +772,29 @@ app.get('/api/cmd', (req, res) => {
   }
 });
 
+// ESP32 запрашивает настройки сна
+app.get('/api/sleep_config', (req, res) => {
+  res.json(sleepSettings);
+});
+
+// Сохранить настройки сна
+app.post('/api/sleep_settings', (req, res) => {
+  const { dayStart, dayEnd, dayInterval, nightInterval } = req.body;
+  
+  if (dayStart !== undefined) sleepSettings.dayStart = parseInt(dayStart);
+  if (dayEnd !== undefined) sleepSettings.dayEnd = parseInt(dayEnd);
+  if (dayInterval !== undefined) sleepSettings.dayInterval = parseInt(dayInterval);
+  if (nightInterval !== undefined) sleepSettings.nightInterval = parseInt(nightInterval);
+  
+  console.log(`[${new Date().toISOString()}] Sleep settings updated:`, sleepSettings);
+  
+  // Добавляем команду для ESP32
+  const cmd = `SLEEP_CFG=${sleepSettings.dayStart},${sleepSettings.dayEnd},${sleepSettings.dayInterval},${sleepSettings.nightInterval};`;
+  commandQueue.push(cmd);
+  
+  res.send('OK');
+});
+
 // Веб-интерфейс добавляет команду в очередь
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;
@@ -630,6 +809,34 @@ app.get('/api/queue_cmd', (req, res) => {
   applyCommandToState(cmd);
   
   res.send('OK');
+});
+
+// ESP32 отправляет подтверждение выполнения команды
+app.get('/api/ack', (req, res) => {
+  const { cmd, status } = req.query;
+  
+  if (!cmd) {
+    return res.status(400).send('Missing cmd parameter');
+  }
+  
+  const ack = {
+    command: cmd,
+    status: status || 'OK',
+    timestamp: new Date().toISOString()
+  };
+  
+  // Добавляем в историю (последние 100 команд)
+  commandHistory.unshift(ack);
+  if (commandHistory.length > 100) commandHistory.pop();
+  
+  console.log(`[${new Date().toISOString()}] ESP32 ACK: ${cmd} → ${status || 'OK'}`);
+  
+  res.send('OK');
+});
+
+// Получить историю команд
+app.get('/api/history', (req, res) => {
+  res.json(commandHistory);
 });
 
 // Применить команду к состоянию сервера (для мгновенного отображения)
@@ -652,8 +859,6 @@ function applyCommandToState(cmdLine) {
         if (lastState.heater === 0) lastState.heater = 1;
       }
     }
-    // Команды калибровки (MLPT, REFILLED, RESET_CALIB, ENABLE_AUTO)
-    // просто добавляются в очередь, состояние не меняют
   });
   lastState.timestamp = Date.now();
 }
@@ -759,8 +964,10 @@ app.listen(port, () => {
   console.log(`📍 Port: ${port}`);
   console.log(`🌐 URL: https://peugeotion.onrender.com`);
   console.log(`📡 ESP32 Endpoints:`);
-  console.log(`   - GET  /api/update    (ESP32 sends state)`);
-  console.log(`   - GET  /api/cmd       (ESP32 gets commands)`);
+  console.log(`   - GET  /api/update        (ESP32 sends state)`);
+  console.log(`   - GET  /api/cmd           (ESP32 gets commands)`);
+  console.log(`   - GET  /api/ack           (ESP32 confirms command)`);
+  console.log(`   - GET  /api/sleep_config  (ESP32 gets sleep settings)`);
   console.log(`🔄 OTA Endpoints:`);
   console.log(`   - POST /api/ota/upload/master`);
   console.log(`   - POST /api/ota/upload/slave`);

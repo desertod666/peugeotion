@@ -1,12 +1,29 @@
 // ============================================
-// Render Server — Peugeotion ESP32
+// Render Server — Peugeotion ESP32 + OTA
 // ============================================
 
 const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Хранение последнего состояния ESP32
+// Хранилище для прошивок
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = './firmware';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, file.originalname);
+  }
+});
+const upload = multer({ storage: storage });
+
+// Состояние ESP32
 let lastState = {
   engine: 'OFF',
   heater: 0,
@@ -18,8 +35,13 @@ let lastState = {
   timestamp: Date.now()
 };
 
-// Очередь команд для ESP32
 let commandQueue = [];
+
+// Версии прошивок
+let firmwareVersions = {
+  master: { version: '1.0.0', file: '', uploaded: null },
+  slave: { version: '1.0.0', file: '', uploaded: null }
+};
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -84,9 +106,9 @@ app.get('/', (req, res) => {
   </div>
   <div class="card sensors">
     <div class="hdr">Sensors</div>
-    <div class="row space"><span>Interior Temp:</span><span id="intTemp" class="badge">--</span></div>
-    <div class="row space"><span>Heater Status:</span><span id="heaterStatus" class="badge">--</span></div>
-    <div class="row space"><span>Fuel Consumed:</span><span id="fuelTag" class="badge">--</span></div>
+    <div class="row space"><span>Battery:</span><span id="battTag" class="badge">--</span></div>
+    <div class="row space"><span>Fuel Tank:</span><span id="tankTag" class="badge">--</span></div>
+    <div class="row space"><span>Consumed:</span><span id="fuelTag" class="badge">--</span></div>
   </div>
   <button class="btn" onclick="location.href='/config'">Settings</button>
 </div>
@@ -107,7 +129,9 @@ function colorizePower(){
 }
 
 function setEngine(e){
-  fetch('/api/queue_cmd?cmd=ENGINE='+e+';').then(refresh);
+  fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
+  state.engine=e;
+  refresh();
 }
 
 function nearestSlot(px,w){
@@ -157,8 +181,10 @@ async function refresh() {
   state.level=js.level;
   
   document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
-  document.getElementById('intTemp').textContent='22°C';
   document.getElementById('engBadge').textContent=state.engine;
+  document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
+  document.getElementById('tankTag').textContent=js.tank+' ml';
+  document.getElementById('fuelTag').textContent=js.cons+' ml';
   
   colorizePower();
   moveKnob(state.engine);
@@ -167,18 +193,19 @@ async function refresh() {
   heaterCtl.style.display=state.heater?'block':'none';
   document.getElementById('heatLvlTag').textContent='Level: '+state.level+'/9';
   drawHeatSegs(state.level);
-  
-  const consumedMl = (js.cons||0)+' ml';
-  document.getElementById('heaterStatus').textContent='--';
-  document.getElementById('fuelTag').textContent=consumedMl;
 }
 
 function setHeater(on){
-  fetch('/api/queue_cmd?cmd=HEATER='+(on?1:0)+';').then(refresh);
+  fetch('/api/queue_cmd?cmd=HEATER='+(on?1:0)+';');
+  state.heater=on;
+  if(!on) state.level=0;
+  refresh();
 }
 
 function setHeaterLevel(lv){
-  fetch('/api/queue_cmd?cmd=LEVEL='+lv+';').then(refresh);
+  fetch('/api/queue_cmd?cmd=LEVEL='+lv+';');
+  state.level=lv;
+  refresh();
 }
 
 power.addEventListener('pointerdown',e=>{
@@ -248,7 +275,8 @@ function doorCenter(){
 }
 
 function doorDo(act){
-  fetch('/api/queue_cmd?cmd=DOOR='+act+';').then(()=>doorCenter());
+  fetch('/api/queue_cmd?cmd=DOOR='+act+';');
+  doorCenter();
 }
 
 doorCenter();
@@ -280,13 +308,13 @@ doorSlider.addEventListener('pointerup',e=>{
 });
 
 refresh();
-setInterval(refresh,3000);
+setInterval(refresh,5000);
 </script>
 </body></html>
   `);
 });
 
-// ---------- СТРАНИЦА НАСТРОЕК (ТВО ДИЗАЙН ИЗ config.html) ----------
+// ---------- СТРАНИЦА НАСТРОЕК С OTA ----------
 
 app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
@@ -300,34 +328,55 @@ app.get('/config', (req, res) => {
 :root{--bg:#0f1420;--panel:#1c2333;--txt:#e6e8ef;--muted:#9aa3b2;--accent:#d94f4f;--ok:#32d583;--info:#3b82f6}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,system-ui,Arial}.wrap{max-width:500px;margin:0 auto;padding:16px}
 .card{background:#1c2333;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.35);margin:14px 0}.hdr{font-weight:800;font-size:18px;margin-bottom:12px}
-.btn{padding:12px 16px;border-radius:10px;background:#39425e;border:none;color:#e9edf4;cursor:pointer;font-size:14px;font-weight:600}
+.btn{padding:12px 16px;border-radius:10px;background:#39425e;border:none;color:#e9edf4;cursor:pointer;font-size:14px;font-weight:600;width:100%}
 .btn.primary{background:#3b82f6}.btn.danger{background:#d84d4d}.btn.success{background:#24a06b}
 .btn:disabled{opacity:0.5;cursor:not-allowed}
-.input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0}
+.input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0;box-sizing:border-box}
 .list-item{background:#2a3246;padding:12px;border-radius:8px;margin:8px 0;display:flex;justify-content:space-between;align-items:center}
-.list-item .name{font-weight:600}
-.list-item .actions{display:flex;gap:8px}
+.list-item .name{font-weight:600;font-family:monospace;font-size:13px}
 .online{color:#32d583}.offline{color:#d84d4f}
+label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </style></head><body>
 <div class="wrap">
   <div class="card">
-    <div class="hdr">System Status</div>
+    <div class="hdr">Server Status</div>
     <div style="margin:12px 0">
-      <div><strong>Server:</strong> Render.com</div>
-      <div style="margin-top:8px"><strong>ESP32 Status:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
+      <div><strong>Platform:</strong> Render.com</div>
+      <div style="margin-top:8px"><strong>ESP32 Connection:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
       <div style="margin-top:8px"><strong>Last Update:</strong> ${stateAge}s ago</div>
       <div style="margin-top:8px"><strong>Queued Commands:</strong> ${commandQueue.length}</div>
     </div>
   </div>
   
   <div class="card">
-    <div class="hdr">ESP32 Data</div>
+    <div class="hdr">OTA Firmware Updates</div>
+    <div style="margin:12px 0">
+      <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '✓' : '(no firmware)'}</div>
+      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '✓' : '(no firmware)'}</div>
+    </div>
+    
+    <label>Upload Master Firmware (.bin)</label>
+    <form id="masterForm" enctype="multipart/form-data">
+      <input type="file" id="masterFile" accept=".bin" class="input">
+      <input type="text" id="masterVer" class="input" placeholder="Version (e.g. 1.0.1)">
+      <button type="submit" class="btn primary">Upload Master</button>
+    </form>
+    
+    <label style="margin-top:16px">Upload Slave Firmware (.bin)</label>
+    <form id="slaveForm" enctype="multipart/form-data">
+      <input type="file" id="slaveFile" accept=".bin" class="input">
+      <input type="text" id="slaveVer" class="input" placeholder="Version (e.g. 1.0.1)">
+      <button type="submit" class="btn primary">Upload Slave</button>
+    </form>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">ESP32 Vehicle Data</div>
     <div style="margin:12px 0">
       <div><strong>Engine:</strong> <span id="engine">${lastState.engine}</span></div>
-      <div style="margin-top:8px"><strong>Heater:</strong> <span id="heater">${lastState.heater?'ON':'OFF'}</span></div>
-      <div style="margin-top:8px"><strong>Level:</strong> <span id="level">${lastState.level}/9</span></div>
+      <div style="margin-top:8px"><strong>Heater:</strong> <span id="heater">${lastState.heater?'ON ('+lastState.level+')':'OFF'}</span></div>
       <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
-      <div style="margin-top:8px"><strong>Tank:</strong> <span id="tank">${lastState.tank} ml</span></div>
+      <div style="margin-top:8px"><strong>Fuel Tank:</strong> <span id="tank">${lastState.tank} ml</span></div>
       <div style="margin-top:8px"><strong>Consumed:</strong> <span id="cons">${lastState.cons} ml</span></div>
     </div>
   </div>
@@ -335,16 +384,46 @@ app.get('/config', (req, res) => {
   <div class="card">
     <div class="hdr">Command Queue</div>
     <div id="queueList" style="margin:12px 0">
-      ${commandQueue.length === 0 ? '<p style="color:#9aa3b2;font-size:14px">No commands queued</p>' : 
-        commandQueue.map((cmd, i) => `<div class="list-item"><div class="name">${cmd}</div></div>`).join('')}
+      ${commandQueue.length === 0 ? '<p style="color:#9aa3b2;font-size:14px">No commands in queue</p>' : 
+        commandQueue.map((cmd, i) => `<div class="list-item"><div class="name">${i+1}. ${cmd}</div></div>`).join('')}
     </div>
-    <button class="btn danger" onclick="clearQueue()">Clear Queue</button>
+    ${commandQueue.length > 0 ? '<button class="btn danger" onclick="clearQueue()">Clear Queue</button>' : ''}
   </div>
   
   <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
 </div>
 
 <script>
+document.getElementById('masterForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('masterFile').files[0];
+  const ver = document.getElementById('masterVer').value;
+  if(!file || !ver) { alert('Please select file and enter version'); return; }
+  
+  const formData = new FormData();
+  formData.append('firmware', file);
+  formData.append('version', ver);
+  
+  const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
+  if(res.ok) { alert('Master firmware uploaded!'); location.reload(); }
+  else { alert('Upload failed: ' + await res.text()); }
+});
+
+document.getElementById('slaveForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('slaveFile').files[0];
+  const ver = document.getElementById('slaveVer').value;
+  if(!file || !ver) { alert('Please select file and enter version'); return; }
+  
+  const formData = new FormData();
+  formData.append('firmware', file);
+  formData.append('version', ver);
+  
+  const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
+  if(res.ok) { alert('Slave firmware uploaded!'); location.reload(); }
+  else { alert('Upload failed: ' + await res.text()); }
+});
+
 async function clearQueue() {
   await fetch('/api/clear_queue', {method: 'POST'});
   location.reload();
@@ -353,13 +432,12 @@ async function clearQueue() {
 setInterval(() => {
   fetch('/api/state').then(r => r.json()).then(js => {
     document.getElementById('engine').textContent = js.engine;
-    document.getElementById('heater').textContent = js.heater ? 'ON' : 'OFF';
-    document.getElementById('level').textContent = js.level + '/9';
+    document.getElementById('heater').textContent = js.heater ? 'ON ('+js.level+')' : 'OFF';
     document.getElementById('batt').textContent = (js.batt/1000).toFixed(2) + 'V';
     document.getElementById('tank').textContent = js.tank + ' ml';
     document.getElementById('cons').textContent = js.cons + ' ml';
   });
-}, 3000);
+}, 5000);
 </script>
 </body></html>
   `);
@@ -394,7 +472,7 @@ app.get('/api/cmd', (req, res) => {
     res.send('NONE');
   } else {
     const cmd = commandQueue.shift();
-    console.log(`[${new Date().toISOString()}] ESP32 CMD: ${cmd}`);
+    console.log(`[${new Date().toISOString()}] ESP32 CMD SENT: ${cmd}`);
     res.send(cmd);
   }
 });
@@ -406,7 +484,7 @@ app.get('/api/queue_cmd', (req, res) => {
     return;
   }
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD queued: ${cmd}`);
+  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
   res.send('OK');
 });
 
@@ -416,9 +494,68 @@ app.post('/api/clear_queue', (req, res) => {
   res.send('OK');
 });
 
+// ---------- OTA API ----------
+
+// Загрузка прошивки
+app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
+  if (!req.file || !req.body.version) {
+    return res.status(400).send('Missing firmware or version');
+  }
+  firmwareVersions.master = {
+    version: req.body.version,
+    file: req.file.filename,
+    uploaded: new Date().toISOString()
+  };
+  console.log(`[OTA] Master firmware uploaded: ${req.file.filename} v${req.body.version}`);
+  res.send('OK');
+});
+
+app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
+  if (!req.file || !req.body.version) {
+    return res.status(400).send('Missing firmware or version');
+  }
+  firmwareVersions.slave = {
+    version: req.body.version,
+    file: req.file.filename,
+    uploaded: new Date().toISOString()
+  };
+  console.log(`[OTA] Slave firmware uploaded: ${req.file.filename} v${req.body.version}`);
+  res.send('OK');
+});
+
+// Проверка версии (для ESP32)
+app.get('/api/ota/version/master', (req, res) => {
+  res.json({ version: firmwareVersions.master.version });
+});
+
+app.get('/api/ota/version/slave', (req, res) => {
+  res.json({ version: firmwareVersions.slave.version });
+});
+
+// Скачивание прошивки (для ESP32)
+app.get('/api/ota/firmware/master', (req, res) => {
+  if (!firmwareVersions.master.file) {
+    return res.status(404).send('No firmware available');
+  }
+  const filePath = path.join(__dirname, 'firmware', firmwareVersions.master.file);
+  console.log(`[OTA] Master firmware download: ${firmwareVersions.master.file}`);
+  res.download(filePath);
+});
+
+app.get('/api/ota/firmware/slave', (req, res) => {
+  if (!firmwareVersions.slave.file) {
+    return res.status(404).send('No firmware available');
+  }
+  const filePath = path.join(__dirname, 'firmware', firmwareVersions.slave.file);
+  console.log(`[OTA] Slave firmware download: ${firmwareVersions.slave.file}`);
+  res.download(filePath);
+});
+
 // ---------- ЗАПУСК ----------
 
 app.listen(port, () => {
   console.log(`🚗 Peugeotion server running on port ${port}`);
   console.log(`👉 https://peugeotion.onrender.com`);
+  console.log(`📡 ESP32 endpoints: /api/update, /api/cmd`);
+  console.log(`🔄 OTA endpoints: /api/ota/*`);
 });

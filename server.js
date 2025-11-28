@@ -1,246 +1,185 @@
-// server.js — backend под Render, который:
-// 1) Отдаёт dashboard.html и config.html (из ESP-кода, без изменений)
-// 2) Эмулирует API ESP /api/state, /api/engine, /api/heater и т.д.
-// 3) Даёт /api/command и /api/status для связи с ESP по токену
+// ============================================
+// Render Server — Peugeotion ESP32
+// ============================================
 
 const express = require('express');
-const path = require('path');
-
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;
 
-// Токен для запросов от ESP
-const API_TOKEN = process.env.API_TOKEN || '';
+// Хранение последнего состояния ESP32 в памяти
+let lastState = {
+  engine: 'OFF',
+  heater: 0,
+  level: 0,
+  batt: 0,
+  tank: 0,
+  cons: 0,
+  seq: 0,
+  timestamp: Date.now()
+};
 
-app.get('/config', (req, res) => {
-  res.sendFile(path.join(__dirname, 'config.html'));
-});
+// Очередь команд для отправки ESP32
+let commandQueue = [];
 
+// Middleware для парсинга JSON
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ================== ВИРТУАЛЬНОЕ СОСТОЯНИЕ МАШИНЫ ==================
-
-const carState = {
-  engine: 'OFF',          // OFF | ACC | IGN | READY
-  heater: false,          // вкл/выкл дизельный
-  level: 0,               // уровень 0..9
-  intTemp: 21.5,
-  slave_stale: true,
-  slave_heater_state: 0,
-  slave_consumed_ml: 0,
-};
-
-let internetStatus = {
-  online: true,
-  mode: 'wifi',
-  failures: 0,
-};
-
-let slaveStatus = {
-  version: 'SLV-1.00',
-  stale: false,
-  tank_ml: 5000,
-  consumed_ml: 0,
-  ml_per_tick: 0.03,
-  fuel_ok: true,
-  water_ok: true,
-  ip: '192.168.0.50',
-  calib_count: 0,
-  auto_mode: 0,
-};
-
-let savedNetworks = [
-  { index: 0, ssid: 'HomeWiFi' },
-];
-
-let lastCommands = new Map(); // carId -> command строка
-
-// ================== СТАТИКА (UI) ==================
+// ---------- ГЛАВНАЯ СТРАНИЦА ----------
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dashboard.html'));
-});
-
-app.get('/config', (req, res) => {
-  res.sendFile(path.join(__dirname, 'config.html'));
-});
-
-// ================== ВСПОМОГАТЕЛЬНОЕ ==================
-
-function requireToken(req, res, next) {
-  if (!API_TOKEN) {
-    return res.status(500).json({ error: 'API_TOKEN is not configured' });
-  }
-  const token = req.header('X-Auth-Token');
-  if (!token || token !== API_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
+  res.send(`
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Peugeotion • ESP32 Control</title>
+<style>
+body{margin:0;padding:20px;background:#0f1420;color:#e6e8ef;font-family:system-ui,Arial}
+.wrap{max-width:600px;margin:0 auto}
+.card{background:#1c2333;border-radius:12px;padding:20px;margin:16px 0;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+h1{margin-top:0;font-size:28px}
+.row{display:flex;justify-content:space-between;margin:10px 0}
+.btn{padding:10px 20px;border-radius:8px;border:none;background:#2563eb;color:#fff;cursor:pointer;font-size:14px}
+.btn:hover{background:#3b82f6}
+input,select{padding:8px;border-radius:6px;border:none;background:#111827;color:#e5e7eb;width:200px}
+</style>
+</head><body>
+<div class="wrap">
+  <div class="card">
+    <h1>🚗 Peugeotion Control</h1>
+    <div class="row"><strong>Engine:</strong><span id="engine">${lastState.engine}</span></div>
+    <div class="row"><strong>Heater:</strong><span id="heater">${lastState.heater ? 'ON' : 'OFF'}</span></div>
+    <div class="row"><strong>Level:</strong><span id="level">${lastState.level}/9</span></div>
+    <div class="row"><strong>Battery:</strong><span id="batt">${(lastState.batt / 1000).toFixed(2)}V</span></div>
+    <div class="row"><strong>Tank:</strong><span id="tank">${lastState.tank} ml</span></div>
+    <div class="row"><strong>Consumed:</strong><span id="cons">${lastState.cons} ml</span></div>
+    <div class="row"><strong>Last update:</strong><span id="time">${new Date(lastState.timestamp).toLocaleString()}</span></div>
+  </div>
+  
+  <div class="card">
+    <h2>Send Command</h2>
+    <form onsubmit="sendCmd(event)">
+      <div class="row">
+        <label>Engine:</label>
+        <select id="engineSel">
+          <option value="">—</option>
+          <option value="OFF">OFF</option>
+          <option value="ACC">ACC</option>
+          <option value="IGN">IGN</option>
+          <option value="READY">READY</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Heater:</label>
+        <select id="heaterSel">
+          <option value="">—</option>
+          <option value="0">OFF</option>
+          <option value="1">ON</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Level:</label>
+        <input id="levelInp" type="number" min="1" max="9" placeholder="1-9">
+      </div>
+      <div class="row">
+        <label>Door:</label>
+        <select id="doorSel">
+          <option value="">—</option>
+          <option value="LOCK">LOCK</option>
+          <option value="UNLOCK">UNLOCK</option>
+        </select>
+      </div>
+      <button class="btn" type="submit">Send</button>
+    </form>
+  </div>
+</div>
+<script>
+async function sendCmd(e){
+  e.preventDefault();
+  const eng=document.getElementById('engineSel').value;
+  const heat=document.getElementById('heaterSel').value;
+  const lvl=document.getElementById('levelInp').value;
+  const door=document.getElementById('doorSel').value;
+  let cmd='';
+  if(eng)cmd+='ENGINE='+eng+';';
+  if(heat)cmd+='HEATER='+heat+';';
+  if(lvl)cmd+='LEVEL='+lvl+';';
+  if(door)cmd+='DOOR='+door+';';
+  if(!cmd){alert('Select at least one command');return;}
+  await fetch('/api/queue_cmd?cmd='+encodeURIComponent(cmd));
+  alert('Command queued: '+cmd);
 }
-
-// ================== API ДЛЯ ESP (команды/статус) ==================
-
-// POST /api/command { carId, command }
-app.post('/api/command', requireToken, (req, res) => {
-  const { carId, command } = req.body || {};
-  if (!carId || typeof command !== 'string') {
-    return res.status(400).json({ error: 'carId and command are required' });
-  }
-  lastCommands.set(carId, command);
-  console.log('[CMD] set', carId, command);
-  res.json({ ok: true });
+setInterval(async()=>{
+  const r=await fetch('/api/state');
+  const j=await r.json();
+  document.getElementById('engine').textContent=j.engine;
+  document.getElementById('heater').textContent=j.heater?'ON':'OFF';
+  document.getElementById('level').textContent=j.level+'/9';
+  document.getElementById('batt').textContent=(j.batt/1000).toFixed(2)+'V';
+  document.getElementById('tank').textContent=j.tank+' ml';
+  document.getElementById('cons').textContent=j.cons+' ml';
+  document.getElementById('time').textContent=new Date(j.timestamp).toLocaleString();
+},3000);
+</script>
+</body></html>
+  `);
 });
 
-// GET /api/command?carId=ion
-app.get('/api/command', requireToken, (req, res) => {
-  const { carId } = req.query;
-  if (!carId) return res.status(400).json({ error: 'carId required' });
-  const cmd = lastCommands.get(carId) || null;
-  if (cmd !== null) lastCommands.delete(carId);
-  res.json({ command: cmd });
-});
+// ---------- API: ПОЛУЧЕНИЕ СОСТОЯНИЯ (для веб-интерфейса) ----------
 
-// POST /api/status { carId, ... }
-app.post('/api/status', requireToken, (req, res) => {
-  console.log('[STATUS] from ESP:', req.body);
-  res.json({ ok: true });
-});
-
-// ================== API, КОТОРЫЙ ЖДЁТ ФРОНТЕНД С ESP ==================
-
-// /api/state — как в master-коде
 app.get('/api/state', (req, res) => {
-  res.json({
-    engine: carState.engine,
-    heater: carState.heater,
-    level: carState.level,
-    intTemp: carState.intTemp,
-    slave_stale: carState.slave_stale,
-    slave_heater_state: carState.slave_heater_state,
-    slave_consumed_ml: carState.slave_consumed_ml,
-  });
+  res.json(lastState);
 });
 
-// /api/engine?set=OFF|ACC|IGN|READY
-app.get('/api/engine', (req, res) => {
-  const val = req.query.set;
-  const allowed = ['OFF', 'ACC', 'IGN', 'READY'];
-  if (allowed.includes(val)) {
-    carState.engine = val;
-    console.log('[ENGINE] ->', val);
-  }
-  res.type('text/plain').send('OK');
+// ---------- API: ESP32 ОТПРАВЛЯЕТ СОСТОЯНИЕ ----------
+
+app.get('/api/update', (req, res) => {
+  const { engine, heater, level, batt, tank, cons, seq } = req.query;
+  
+  lastState = {
+    engine: engine || 'OFF',
+    heater: parseInt(heater) || 0,
+    level: parseInt(level) || 0,
+    batt: parseInt(batt) || 0,
+    tank: parseInt(tank) || 0,
+    cons: parseInt(cons) || 0,
+    seq: parseInt(seq) || 0,
+    timestamp: Date.now()
+  };
+
+  console.log(`[ESP32 UPDATE] engine=${engine}, heater=${heater}, batt=${batt}mV, tank=${tank}ml`);
+  res.send('OK');
 });
 
-// /api/heater?enable=0/1&level=n
-app.get('/api/heater', (req, res) => {
-  if (req.query.enable !== undefined) {
-    carState.heater = req.query.enable === '1';
-    if (!carState.heater) carState.level = 0;
-  }
-  if (req.query.level !== undefined) {
-    let lvl = parseInt(req.query.level, 10) || 0;
-    if (lvl < 1) lvl = 1;
-    if (lvl > 9) lvl = 9;
-    carState.level = lvl;
-    carState.heater = true;
-  }
-  console.log('[HEATER]', carState.heater, 'lvl', carState.level);
-  res.type('text/plain').send('OK');
-});
+// ---------- API: ESP32 ЗАПРАШИВАЕТ КОМАНДЫ ----------
 
-// /api/door_act?action=LOCK|UNLOCK
-app.get('/api/door_act', (req, res) => {
-  const a = req.query.action;
-  console.log('[DOOR]', a);
-  res.type('text/plain').send('OK');
-});
-
-// ----- Эмуляция статусов для /config страницы -----
-
-app.get('/api/slave_status', (req, res) => {
-  res.json({
-    ...slaveStatus,
-  });
-});
-
-app.get('/api/internet_status', (req, res) => {
-  res.json(internetStatus);
-});
-
-app.get('/saved_networks', (req, res) => {
-  res.json(savedNetworks);
-});
-
-app.get('/start_scan', (req, res) => {
-  // просто говорим "скан начат"
-  res.type('text/plain').send('OK');
-});
-
-app.get('/scan_results', (req, res) => {
-  // фиктивный список сетей
-  res.json({
-    scanning: false,
-    list: [
-      { ssid: 'HomeWiFi', rssi: -45, secure: true },
-      { ssid: 'Garage',  rssi: -60, secure: true },
-    ],
-  });
-});
-
-app.get('/add_network', (req, res) => {
-  const ssid = req.query.ssid || '';
-  if (ssid) {
-    const idx = savedNetworks.length;
-    savedNetworks.push({ index: idx, ssid });
-    console.log('[WIFI] add', ssid);
-    res.type('text/plain').send('OK');
+app.get('/api/cmd', (req, res) => {
+  if (commandQueue.length === 0) {
+    res.send('NONE');
   } else {
-    res.status(400).send('Missing ssid');
+    const cmd = commandQueue.shift(); // берём первую команду из очереди
+    console.log(`[ESP32 CMD] Sending: ${cmd}`);
+    res.send(cmd);
   }
 });
 
-app.get('/remove_network', (req, res) => {
-  const idx = parseInt(req.query.index || '-1', 10);
-  if (idx >= 0 && idx < savedNetworks.length) {
-    console.log('[WIFI] remove index', idx);
-    savedNetworks.splice(idx, 1);
+// ---------- API: ВЕБ-ИНТЕРФЕЙС ДОБАВЛЯЕТ КОМАНДУ В ОЧЕРЕДЬ ----------
+
+app.get('/api/queue_cmd', (req, res) => {
+  const { cmd } = req.query;
+  if (!cmd) {
+    res.status(400).send('Missing cmd parameter');
+    return;
   }
-  res.type('text/plain').send('OK');
+  commandQueue.push(cmd);
+  console.log(`[WEB CMD] Queued: ${cmd}`);
+  res.send('OK');
 });
 
-app.post('/api/ping', (req, res) => {
-  console.log('[PING] from UI');
-  res.type('text/plain').send('OK');
-});
+// ---------- ЗАПУСК СЕРВЕРА ----------
 
-app.post('/api/slave_mlpt', (req, res) => {
-  console.log('[CAL] set ml/tick', req.body);
-  res.type('text/plain').send('OK');
-});
-
-app.post('/api/slave_reset', (req, res) => {
-  console.log('[CAL] reset ticks');
-  res.type('text/plain').send('OK');
-});
-
-app.post('/api/refilled', (req, res) => {
-  console.log('[CAL] refilled', req.body);
-  res.type('text/plain').send('OK');
-});
-
-app.post('/api/enable_auto', (req, res) => {
-  console.log('[AUTO] enable');
-  res.type('text/plain').send('OK');
-});
-
-app.post('/api/disconnect_wifi', (req, res) => {
-  console.log('[WIFI] disconnect (stub)');
-  res.type('text/plain').send('OK');
-});
-
-// ==================================================
-
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`🚗 Peugeotion server running on port ${port}`);
+  console.log(`👉 https://peugeotion.onrender.com`);
 });

@@ -1,5 +1,101 @@
 // ============================================
-// Render Server — Peugeotion ESP32 + Timers + NTP
+// Render Server — Peugeotion ESP32 Car Control
+// Version: 2.0.0
+// ============================================
+
+/*
+  ============================================
+  📡 КОМАНДЫ ПРОЕКТА
+  ============================================
+  
+  ✅ СЕРВЕР → MASTER (через /api/cmd)
+  ─────────────────────────────────────────
+  ENGINE=OFF;              - Выключить двигатель
+  ENGINE=ACC;              - Режим ACC (аксессуары)
+  ENGINE=IGN;              - Режим IGN (зажигание)
+  ENGINE=READY;            - Режим READY (заводка)
+  
+  HEATER=0;                - Выключить отопитель
+  HEATER=1;                - Включить отопитель
+  LEVEL=1;                 - Уровень мощности 1-9
+  
+  DOOR=LOCK;               - Закрыть двери
+  DOOR=UNLOCK;             - Открыть двери
+  
+  MLPT=0.03;               - Установить ml/tick (калибровка)
+  REFILLED=5000;           - Заправлено 5000ml
+  RESET_CALIB=1;           - Сброс калибровки
+  ENABLE_AUTO=1;           - Включить авто режим
+  
+  SLEEP_CFG=6,20,300,900;  - Настройки сна (dayStart, dayEnd, dayInterval, nightInterval)
+  
+  MASTER_UPDATE=1.0.1;     - OTA обновление мастера
+  SLAVE_UPDATE=1.0.1;      - OTA обновление слейва
+  
+  
+  ✅ MASTER → СЕРВЕР
+  ─────────────────────────────────────────
+  GET /api/update?engine=ACC&heater=1&level=5&batt=12800&tank=5000&cons=120&seq=42
+    - Отправка текущего состояния на сервер
+    - engine: OFF/ACC/IGN/READY
+    - heater: 0/1
+    - level: 1-9
+    - batt: напряжение батареи в mV
+    - tank: уровень топлива в ml
+    - cons: расход топлива в ml
+    - seq: номер последовательности
+  
+  GET /api/cmd
+    - Запрос команды с сервера
+    - Ответ: "NONE" или "ENGINE=ACC;HEATER=1;LEVEL=5;"
+  
+  GET /api/ack?cmd=ENGINE=ACC;&status=OK
+    - Подтверждение выполнения команды
+    - status: OK/ERROR
+  
+  GET /api/time
+    - Запрос текущего времени для синхронизации
+    - Ответ: {timestamp: 1732834567, iso: "2025-11-28T21:42:47Z", timezone: "Europe/Oslo", offset: 3600}
+  
+  GET /api/sleep_config
+    - Запрос настроек энергосбережения
+    - Ответ: {dayStart: 6, dayEnd: 20, dayInterval: 300, nightInterval: 900}
+  
+  GET /api/ota/version/master
+    - Проверка версии прошивки мастера
+  
+  GET /api/ota/firmware/master
+    - Скачивание прошивки мастера (.bin)
+  
+  
+  ✅ WEB → СЕРВЕР
+  ─────────────────────────────────────────
+  GET /api/queue_cmd?cmd=ENGINE=ACC;
+    - Добавление команды в очередь через веб-интерфейс
+  
+  POST /api/heater_schedule
+    - Сохранение таймера прогрева
+    - Body: {enabled, hour, minute, heaterLevel, preHeatTime, autoReady}
+  
+  POST /api/sleep_settings
+    - Сохранение настроек энергосбережения
+    - Body: {dayStart, dayEnd, dayInterval, nightInterval}
+  
+  POST /api/ota/upload/master
+    - Загрузка прошивки мастера
+  
+  POST /api/ota/upload/slave
+    - Загрузка прошивки слейва
+  
+  GET /api/state
+    - Получение текущего состояния системы
+  
+  GET /api/history
+    - Получение истории команд (логи)
+*/
+
+// ============================================
+// ЗАВИСИМОСТИ
 // ============================================
 
 const express = require('express');
@@ -10,7 +106,10 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Хранилище для прошивок
+// ============================================
+// НАСТРОЙКА ХРАНИЛИЩА ПРОШИВОК
+// ============================================
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = './firmware';
@@ -23,7 +122,11 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// Состояние ESP32
+// ============================================
+// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ
+// ============================================
+
+// Текущее состояние ESP32
 let lastState = {
   engine: 'OFF',
   heater: 0,
@@ -35,7 +138,10 @@ let lastState = {
   timestamp: Date.now()
 };
 
+// Очередь команд для ESP32
 let commandQueue = [];
+
+// История выполненных команд (последние 100)
 let commandHistory = [];
 
 // Версии прошивок
@@ -44,12 +150,12 @@ let firmwareVersions = {
   slave: { version: '1.0.0', file: '', uploaded: null }
 };
 
-// Настройки таймеров сна
+// Настройки энергосбережения
 let sleepSettings = {
-  dayStart: 6,
-  dayEnd: 20,
-  dayInterval: 300,
-  nightInterval: 900
+  dayStart: 6,        // День начинается с 6:00
+  dayEnd: 20,         // День заканчивается в 20:00
+  dayInterval: 300,   // Днём просыпаться каждые 300 сек (5 мин)
+  nightInterval: 900  // Ночью просыпаться каждые 900 сек (15 мин)
 };
 
 // Настройки таймера прогрева
@@ -58,20 +164,25 @@ let heaterSchedule = {
   hour: 7,
   minute: 0,
   heaterLevel: 5,
-  preHeatTime: 180,
+  preHeatTime: 180,  // 3 минуты прогрева до включения READY
   autoReady: true
 };
+
+// ============================================
+// MIDDLEWARE
+// ============================================
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
-// ФУНКЦИЯ: Запуск прогрева по таймеру (БЕЗ CRON)
+// ФУНКЦИЯ: Запуск прогрева по таймеру
 // ============================================
 
 function triggerHeaterSchedule() {
   console.log(`[SCHEDULE] Heater timer triggered at ${new Date().toISOString()}`);
   
+  // Шаг 1: Включаем отопитель
   const heaterCmd = `HEATER=1;LEVEL=${heaterSchedule.heaterLevel};`;
   commandQueue.push(heaterCmd);
   
@@ -84,6 +195,7 @@ function triggerHeaterSchedule() {
   
   console.log(`[SCHEDULE] Queued: ${heaterCmd}`);
   
+  // Шаг 2: Через заданное время включаем ENGINE=READY (если включено)
   if (heaterSchedule.autoReady) {
     setTimeout(() => {
       const readyCmd = 'ENGINE=READY;';
@@ -101,7 +213,7 @@ function triggerHeaterSchedule() {
 }
 
 // ============================================
-// ПРОВЕРКА ВРЕМЕНИ БЕЗ CRON
+// ПРОВЕРКА ВРЕМЕНИ ДЛЯ ТАЙМЕРА (БЕЗ CRON)
 // ============================================
 
 function checkHeaterSchedule() {
@@ -111,6 +223,7 @@ function checkHeaterSchedule() {
   const currentHour = now.getHours();
   const currentMinute = now.getMinutes();
   
+  // Проверяем точное время
   if (currentHour === heaterSchedule.hour && currentMinute === heaterSchedule.minute) {
     const lastTrigger = now.getTime();
     if (!global.lastHeaterTrigger || lastTrigger - global.lastHeaterTrigger > 60000) {
@@ -124,7 +237,7 @@ function checkHeaterSchedule() {
 setInterval(checkHeaterSchedule, 30000);
 
 // ============================================
-// ГЛАВНАЯ СТРАНИЦА
+// ГЛАВНАЯ СТРАНИЦА (Dashboard)
 // ============================================
 
 app.get('/', (req, res) => {
@@ -418,17 +531,20 @@ setInterval(refresh,3000);
 });
 
 // ============================================
-// СТРАНИЦА НАСТРОЕК (с select вместо input)
+// СТРАНИЦА НАСТРОЕК (Configuration)
 // ============================================
 
 app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
   const isOnline = stateAge < 120;
   
-  // Генерируем options для часов (0-23)
-  let hourOptions = '';
-  for(let i=0; i<=23; i++) {
-    hourOptions += `<option value="${i}">${i}</option>`;
+  // Генерируем options для времени с получасами (0:00 - 23:30)
+  let timeOptions = '';
+  for(let h = 0; h <= 23; h++) {
+    for(let m = 0; m < 60; m += 30) {
+      const timeStr = `${h}:${String(m).padStart(2, '0')}`;
+      timeOptions += `<option value="${h},${m}">${timeStr}</option>`;
+    }
   }
   
   // Генерируем options для минут (0-59)
@@ -478,8 +594,9 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 .log-status.ok{color:#32d583}
 .log-status.error{color:#d84d4f}
 .log-status.scheduled{color:#3b82f6}
+.log-status.queued{color:#f0b429}
 .time-row{display:flex;gap:12px;align-items:center}
-.time-input{width:100px}
+.time-select{flex:1}
 .toggle{position:relative;display:inline-block;width:50px;height:24px}
 .toggle input{opacity:0;width:0;height:0}
 .toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#39425e;border-radius:24px;transition:0.3s}
@@ -502,7 +619,7 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <div id="logWindow" class="log-window">
       <div style="color:#6b7280;text-align:center">Waiting for commands...</div>
     </div>
-    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">Shows all commands sent to ESP32: engine, heater, doors, timers, etc.</div>
+    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">Shows all commands: engine, heater, doors, calibration, timers</div>
   </div>
   
   <div class="card">
@@ -518,9 +635,13 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <label>Start Time</label>
     <div class="time-row">
-      <select id="timerHour" class="select time-input">${hourOptions}</select>
+      <select id="timerHour" class="select" style="width:80px">
+        ${Array.from({length:24}, (_, i) => `<option value="${i}">${i}</option>`).join('')}
+      </select>
       <div style="padding-top:8px">:</div>
-      <select id="timerMinute" class="select time-input">${minuteOptions}</select>
+      <select id="timerMinute" class="select" style="width:80px">
+        ${minuteOptions}
+      </select>
     </div>
     
     <label style="margin-top:16px">Heater Power Level</label>
@@ -528,7 +649,7 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <label style="margin-top:16px">Pre-heat Time</label>
     <select id="preHeatTime" class="select">${intervalOptions}</select>
-    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">How long to warm up before starting engine</div>
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Warm-up duration before engine start</div>
     
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
       <strong>Auto Engine READY</strong>
@@ -542,22 +663,23 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
     
     <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ How it works:</strong><br>
-      1. At specified time, heater turns ON<br>
-      2. After pre-heat time, engine switches to READY (if enabled)<br>
-      3. Car is warm and ready to drive!
+      <strong>ℹ️ Auto-start logic:</strong><br>
+      1. At set time → Heater ON<br>
+      2. After pre-heat → Engine READY<br>
+      3. Car ready to drive!
     </div>
   </div>
   
   <div class="card">
-    <div class="hdr">⏰ Sleep Timer Settings</div>
+    <div class="hdr">⚡ Energy Saving Mode</div>
     
-    <label>Day Time Period</label>
+    <label>Active Period (Day Mode)</label>
     <div class="time-row">
-      <select id="dayStart" class="select time-input">${hourOptions}</select>
+      <select id="dayStart" class="select time-select">${timeOptions}</select>
       <div style="padding-top:8px">to</div>
-      <select id="dayEnd" class="select time-input">${hourOptions}</select>
+      <select id="dayEnd" class="select time-select">${timeOptions}</select>
     </div>
+    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Frequent wake-ups during this period</div>
     
     <label style="margin-top:16px">Wake Interval (Day)</label>
     <select id="dayInterval" class="select">${intervalOptions}</select>
@@ -566,7 +688,13 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <select id="nightInterval" class="select">${intervalOptions}</select>
     
     <div style="height:16px"></div>
-    <button class="btn primary" onclick="saveSleepSettings()">Save Sleep Settings</button>
+    <button class="btn primary" onclick="saveSleepSettings()">Save Energy Settings</button>
+    
+    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
+      <strong>ℹ️ Energy modes:</strong><br>
+      • Day: Quick response (e.g. 5min)<br>
+      • Night: Battery saving (e.g. 15min)
+    </div>
   </div>
   
   <div class="card">
@@ -632,13 +760,14 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </div>
 
 <script>
-// Устанавливаем сохранённые значения в select
+// Устанавливаем сохранённые значения
 document.getElementById('timerHour').value = ${heaterSchedule.hour};
 document.getElementById('timerMinute').value = ${heaterSchedule.minute};
 document.getElementById('timerLevel').value = ${heaterSchedule.heaterLevel};
 document.getElementById('preHeatTime').value = ${heaterSchedule.preHeatTime};
-document.getElementById('dayStart').value = ${sleepSettings.dayStart};
-document.getElementById('dayEnd').value = ${sleepSettings.dayEnd};
+
+document.getElementById('dayStart').value = '${sleepSettings.dayStart},0';
+document.getElementById('dayEnd').value = '${sleepSettings.dayEnd},0';
 document.getElementById('dayInterval').value = ${sleepSettings.dayInterval};
 document.getElementById('nightInterval').value = ${sleepSettings.nightInterval};
 
@@ -668,24 +797,26 @@ async function saveHeaterSchedule() {
   });
   
   if(res.ok) {
-    alert('✓ Heater timer saved!\\n' + 
-          (enabled ? 'Timer will trigger at ' + hour + ':' + String(minute).padStart(2,'0') : 'Timer disabled'));
+    alert('✓ Timer saved!\\n' + 
+          (enabled ? 'Start: ' + hour + ':' + String(minute).padStart(2,'0') : 'Disabled'));
     location.reload();
   } else {
-    alert('✗ Failed to save');
+    alert('✗ Save failed');
   }
 }
 
-// ========== НАСТРОЙКИ СНА ==========
+// ========== ENERGY SAVING ==========
 
 async function saveSleepSettings() {
-  const dayStart = parseInt(document.getElementById('dayStart').value);
-  const dayEnd = parseInt(document.getElementById('dayEnd').value);
+  const dayStartVal = document.getElementById('dayStart').value.split(',');
+  const dayEndVal = document.getElementById('dayEnd').value.split(',');
+  const dayStart = parseInt(dayStartVal[0]);
+  const dayEnd = parseInt(dayEndVal[0]);
   const dayInterval = parseInt(document.getElementById('dayInterval').value);
   const nightInterval = parseInt(document.getElementById('nightInterval').value);
   
   if(dayStart >= dayEnd) {
-    alert('Day start must be before day end');
+    alert('Start must be before end');
     return;
   }
   
@@ -703,9 +834,9 @@ async function saveSleepSettings() {
   });
   
   if(res.ok) {
-    alert('✓ Sleep settings saved!');
+    alert('✓ Energy settings saved!');
   } else {
-    alert('✗ Failed to save');
+    alert('✗ Save failed');
   }
 }
 
@@ -714,30 +845,30 @@ async function saveSleepSettings() {
 async function setMlPerTick() {
   const val = document.getElementById('mlPerTick').value;
   if(!val || val <= 0) { 
-    alert('Please enter valid ml/tick value'); 
+    alert('Enter valid ml/tick'); 
     return; 
   }
   
   await fetch('/api/queue_cmd?cmd=MLPT='+val+';');
-  alert('✓ ml/tick queued');
+  alert('✓ Command queued');
   setTimeout(refresh, 1000);
 }
 
 async function sendRefill() {
   const val = document.getElementById('refilledMl').value;
   if(!val || val <= 0) { 
-    alert('Please enter refilled amount'); 
+    alert('Enter refilled amount'); 
     return; 
   }
   
   await fetch('/api/queue_cmd?cmd=REFILLED='+val+';');
-  alert('✓ Refilled queued: ' + val + ' ml');
+  alert('✓ Refilled: ' + val + ' ml');
   document.getElementById('refilledMl').value = '';
   setTimeout(refresh, 1000);
 }
 
 async function resetCalib() {
-  if(!confirm('Reset all calibration?')) return;
+  if(!confirm('Reset calibration?')) return;
   
   await fetch('/api/queue_cmd?cmd=RESET_CALIB=1;');
   alert('✓ Reset queued');
@@ -764,7 +895,7 @@ async function loadLogs() {
     const logWindow = document.getElementById('logWindow');
     
     if (history.length === 0) {
-      logWindow.innerHTML = '<div style="color:#6b7280;text-align:center">Waiting for commands...</div>';
+      logWindow.innerHTML = '<div style="color:#6b7280;text-align:center">Waiting...</div>';
       return;
     }
     
@@ -787,6 +918,9 @@ async function loadLogs() {
       } else if(item.status === 'SCHEDULED') {
         statusClass = 'scheduled';
         statusIcon = '⏰';
+      } else if(item.status === 'QUEUED') {
+        statusClass = 'queued';
+        statusIcon = '⏳';
       }
       
       html += '<div class="log-entry">';
@@ -802,7 +936,7 @@ async function loadLogs() {
       logWindow.scrollTop = logWindow.scrollHeight;
     }
   } catch(e) {
-    console.error('Log load error:', e);
+    console.error('Log error:', e);
   }
 }
 
@@ -825,7 +959,7 @@ document.getElementById('masterForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Master uploaded!');
+      alert('✓ Uploaded!');
       location.reload(); 
     } else { 
       alert('✗ Failed'); 
@@ -833,7 +967,7 @@ document.getElementById('masterForm').addEventListener('submit', async (e) => {
       btn.textContent = 'Upload Master';
     }
   } catch(err) {
-    alert('✗ Error: ' + err.message);
+    alert('✗ Error');
     btn.disabled = false;
     btn.textContent = 'Upload Master';
   }
@@ -856,7 +990,7 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Slave uploaded!'); 
+      alert('✓ Uploaded!'); 
       location.reload(); 
     } else { 
       alert('✗ Failed'); 
@@ -864,7 +998,7 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
       btn.textContent = 'Upload Slave';
     }
   } catch(err) {
-    alert('✗ Error: ' + err.message);
+    alert('✗ Error');
     btn.disabled = false;
     btn.textContent = 'Upload Slave';
   }
@@ -911,10 +1045,12 @@ setInterval(updateServerTime, 1000);
 // API ENDPOINTS
 // ============================================
 
+// Получить текущее состояние
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
 
+// ESP32 отправляет обновление состояния
 app.get('/api/update', (req, res) => {
   const { engine, heater, level, batt, tank, cons, seq } = req.query;
   
@@ -929,10 +1065,11 @@ app.get('/api/update', (req, res) => {
     timestamp: Date.now()
   };
 
-  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}`);
+  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}, batt=${batt}mV`);
   res.send('OK');
 });
 
+// ESP32 запрашивает текущее время (NTP sync)
 app.get('/api/time', (req, res) => {
   const now = new Date();
   res.json({
@@ -943,6 +1080,7 @@ app.get('/api/time', (req, res) => {
   });
 });
 
+// ESP32 запрашивает команды
 app.get('/api/cmd', (req, res) => {
   if (commandQueue.length === 0) {
     res.send('NONE');
@@ -953,10 +1091,12 @@ app.get('/api/cmd', (req, res) => {
   }
 });
 
+// ESP32 запрашивает настройки энергосбережения
 app.get('/api/sleep_config', (req, res) => {
   res.json(sleepSettings);
 });
 
+// Сохранить настройки энергосбережения
 app.post('/api/sleep_settings', (req, res) => {
   const { dayStart, dayEnd, dayInterval, nightInterval } = req.body;
   
@@ -970,16 +1110,16 @@ app.post('/api/sleep_settings', (req, res) => {
   const cmd = `SLEEP_CFG=${sleepSettings.dayStart},${sleepSettings.dayEnd},${sleepSettings.dayInterval},${sleepSettings.nightInterval};`;
   commandQueue.push(cmd);
   
-  // Добавляем в лог
   commandHistory.unshift({
     command: cmd,
-    status: 'OK',
+    status: 'QUEUED',
     timestamp: new Date().toISOString()
   });
   
   res.send('OK');
 });
 
+// Сохранить настройки таймера прогрева
 app.post('/api/heater_schedule', (req, res) => {
   const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
   
@@ -995,6 +1135,7 @@ app.post('/api/heater_schedule', (req, res) => {
   res.send('OK');
 });
 
+// Веб добавляет команду в очередь
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;
   if (!cmd) {
@@ -1004,7 +1145,6 @@ app.get('/api/queue_cmd', (req, res) => {
   commandQueue.push(cmd);
   console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
   
-  // Добавляем в лог
   commandHistory.unshift({
     command: cmd,
     status: 'QUEUED',
@@ -1017,6 +1157,7 @@ app.get('/api/queue_cmd', (req, res) => {
   res.send('OK');
 });
 
+// ESP32 отправляет подтверждение (ACK)
 app.get('/api/ack', (req, res) => {
   const { cmd, status } = req.query;
   
@@ -1024,7 +1165,7 @@ app.get('/api/ack', (req, res) => {
     return res.status(400).send('Missing cmd parameter');
   }
   
-  // Обновляем статус в истории
+  // Обновляем статус команды в истории
   const existingEntry = commandHistory.find(e => e.command === cmd && e.status === 'QUEUED');
   if (existingEntry) {
     existingEntry.status = status || 'OK';
@@ -1043,10 +1184,12 @@ app.get('/api/ack', (req, res) => {
   res.send('OK');
 });
 
+// Получить историю команд
 app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
 
+// Применить команду к локальному состоянию (мгновенное обновление UI)
 function applyCommandToState(cmdLine) {
   const parts = cmdLine.split(';');
   parts.forEach(part => {
@@ -1070,10 +1213,11 @@ function applyCommandToState(cmdLine) {
   lastState.timestamp = Date.now();
 }
 
+// Очистить очередь команд
 app.post('/api/clear_queue', (req, res) => {
   const cleared = commandQueue.length;
   commandQueue = [];
-  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared})`);
+  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared} commands)`);
   res.send('OK');
 });
 
@@ -1081,6 +1225,7 @@ app.post('/api/clear_queue', (req, res) => {
 // OTA ENDPOINTS
 // ============================================
 
+// Загрузка прошивки Master
 app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
@@ -1092,13 +1237,14 @@ app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Master uploaded: ${req.file.filename} v${req.body.version}`);
+  console.log(`[OTA] Master uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
   
   commandQueue.push('MASTER_UPDATE=' + req.body.version + ';');
   
   res.send('OK');
 });
 
+// Загрузка прошивки Slave
 app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
@@ -1110,21 +1256,24 @@ app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Slave uploaded: ${req.file.filename} v${req.body.version}`);
+  console.log(`[OTA] Slave uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
   
   commandQueue.push('SLAVE_UPDATE=' + req.body.version + ';');
   
   res.send('OK');
 });
 
+// Проверка версии Master
 app.get('/api/ota/version/master', (req, res) => {
   res.json({ version: firmwareVersions.master.version });
 });
 
+// Проверка версии Slave
 app.get('/api/ota/version/slave', (req, res) => {
   res.json({ version: firmwareVersions.slave.version });
 });
 
+// Скачивание прошивки Master
 app.get('/api/ota/firmware/master', (req, res) => {
   if (!firmwareVersions.master.file) {
     return res.status(404).send('No firmware available');
@@ -1137,6 +1286,7 @@ app.get('/api/ota/firmware/master', (req, res) => {
   res.download(filePath);
 });
 
+// Скачивание прошивки Slave
 app.get('/api/ota/firmware/slave', (req, res) => {
   if (!firmwareVersions.slave.file) {
     return res.status(404).send('No firmware available');
@@ -1150,15 +1300,22 @@ app.get('/api/ota/firmware/slave', (req, res) => {
 });
 
 // ============================================
-// ЗАПУСК
+// ЗАПУСК СЕРВЕРА
 // ============================================
 
 app.listen(port, () => {
-  console.log(`\n${'='.repeat(50)}`);
-  console.log(`🚗 Peugeotion Server Started`);
-  console.log(`${'='.repeat(50)}`);
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`🚗 Peugeotion Server v2.0.0 Started`);
+  console.log(`${'='.repeat(60)}`);
   console.log(`📍 Port: ${port}`);
   console.log(`🌐 URL: https://peugeotion.onrender.com`);
-  console.log(`🔥 Heater: ${heaterSchedule.enabled ? `ON at ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')}` : 'DISABLED'}`);
-  console.log(`${'='.repeat(50)}\n`);
+  console.log(`📡 ESP32 Endpoints:`);
+  console.log(`   GET  /api/update    - ESP32 sends state`);
+  console.log(`   GET  /api/cmd       - ESP32 gets commands`);
+  console.log(`   GET  /api/time      - Time sync (NTP)`);
+  console.log(`   GET  /api/ack       - Command confirmation`);
+  console.log(`   GET  /api/sleep_config - Energy settings`);
+  console.log(`🔥 Heater Timer: ${heaterSchedule.enabled ? `⏰ ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')}` : '❌ DISABLED'}`);
+  console.log(`⚡ Energy Mode: Day ${sleepSettings.dayStart}:00-${sleepSettings.dayEnd}:00`);
+  console.log(`${'='.repeat(60)}\n`);
 });

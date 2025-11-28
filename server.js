@@ -1,6 +1,6 @@
 // ============================================
 // Render Server — Peugeotion ESP32 Car Control
-// Version: 2.0.0
+// Version: 2.1.0 — GitHub Auto-Sync Edition
 // ============================================
 
 /*
@@ -36,62 +36,23 @@
   ✅ MASTER → СЕРВЕР
   ─────────────────────────────────────────
   GET /api/update?engine=ACC&heater=1&level=5&batt=12800&tank=5000&cons=120&seq=42
-    - Отправка текущего состояния на сервер
-    - engine: OFF/ACC/IGN/READY
-    - heater: 0/1
-    - level: 1-9
-    - batt: напряжение батареи в mV
-    - tank: уровень топлива в ml
-    - cons: расход топлива в ml
-    - seq: номер последовательности
-  
   GET /api/cmd
-    - Запрос команды с сервера
-    - Ответ: "NONE" или "ENGINE=ACC;HEATER=1;LEVEL=5;"
-  
   GET /api/ack?cmd=ENGINE=ACC;&status=OK
-    - Подтверждение выполнения команды
-    - status: OK/ERROR
-  
   GET /api/time
-    - Запрос текущего времени для синхронизации
-    - Ответ: {timestamp: 1732834567, iso: "2025-11-28T21:42:47Z", timezone: "Europe/Oslo", offset: 3600}
-  
   GET /api/sleep_config
-    - Запрос настроек энергосбережения
-    - Ответ: {dayStart: 6, dayEnd: 20, dayInterval: 300, nightInterval: 900}
-  
   GET /api/ota/version/master
-    - Проверка версии прошивки мастера
-  
   GET /api/ota/firmware/master
-    - Скачивание прошивки мастера (.bin)
   
   
   ✅ WEB → СЕРВЕР
   ─────────────────────────────────────────
   GET /api/queue_cmd?cmd=ENGINE=ACC;
-    - Добавление команды в очередь через веб-интерфейс
-  
   POST /api/heater_schedule
-    - Сохранение таймера прогрева
-    - Body: {enabled, hour, minute, heaterLevel, preHeatTime, autoReady}
-  
   POST /api/sleep_settings
-    - Сохранение настроек энергосбережения
-    - Body: {dayStart, dayEnd, dayInterval, nightInterval}
-  
-  POST /api/ota/upload/master
-    - Загрузка прошивки мастера
-  
-  POST /api/ota/upload/slave
-    - Загрузка прошивки слейва
-  
+  POST /api/ota/upload/master (автоматически загружает в GitHub)
+  POST /api/ota/upload/slave (автоматически загружает в GitHub)
   GET /api/state
-    - Получение текущего состояния системы
-  
   GET /api/history
-    - Получение истории команд (логи)
 */
 
 // ============================================
@@ -102,9 +63,109 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// ============================================
+// GITHUB INTEGRATION
+// ============================================
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO;
+const GITHUB_BRANCH = 'main';
+
+async function uploadToGitHub(filename, fileBuffer) {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) {
+    console.log('[GITHUB] Token or repo not configured, skipping upload');
+    return false;
+  }
+  
+  try {
+    // Получаем текущий SHA файла (если существует)
+    const getFileOptions = {
+      hostname: 'api.github.com',
+      path: `/repos/${GITHUB_REPO}/contents/firmware/${filename}`,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Peugeotion-Server',
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    };
+    
+    let existingSha = null;
+    
+    await new Promise((resolve, reject) => {
+      const req = https.request(getFileOptions, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            const json = JSON.parse(data);
+            existingSha = json.sha;
+            console.log(`[GITHUB] File exists, SHA: ${existingSha.substring(0, 7)}`);
+          }
+          resolve();
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    
+    // Загружаем файл
+    const content = fileBuffer.toString('base64');
+    
+    const uploadData = JSON.stringify({
+      message: `Update firmware: ${filename}`,
+      content: content,
+      branch: GITHUB_BRANCH,
+      sha: existingSha
+    });
+    
+    const uploadOptions = {
+      hostname: 'api.github.com',
+      path: `/repos/${GITHUB_REPO}/contents/firmware/${filename}`,
+      method: 'PUT',
+      headers: {
+        'User-Agent': 'Peugeotion-Server',
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(uploadData),
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    };
+    
+    return await new Promise((resolve, reject) => {
+      const req = https.request(uploadOptions, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200 || res.statusCode === 201) {
+            console.log(`[GITHUB] ✓ Uploaded: ${filename}`);
+            resolve(true);
+          } else {
+            console.log(`[GITHUB] ✗ Failed (${res.statusCode}): ${data}`);
+            resolve(false);
+          }
+        });
+      });
+      
+      req.on('error', (err) => {
+        console.log('[GITHUB] Error:', err.message);
+        resolve(false);
+      });
+      
+      req.write(uploadData);
+      req.end();
+    });
+    
+  } catch (error) {
+    console.log('[GITHUB] Upload error:', error.message);
+    return false;
+  }
+}
 
 // ============================================
 // НАСТРОЙКА ХРАНИЛИЩА ПРОШИВОК
@@ -123,10 +184,55 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // ============================================
+// АВТОМАТИЧЕСКАЯ ЗАГРУЗКА ПРОШИВОК ИЗ ПАПКИ
+// ============================================
+
+function loadFirmwareFromDirectory() {
+  const firmwareDir = path.join(__dirname, 'firmware');
+  
+  if (!fs.existsSync(firmwareDir)) {
+    console.log('[FIRMWARE] Directory not found, creating...');
+    fs.mkdirSync(firmwareDir);
+    return;
+  }
+  
+  const files = fs.readdirSync(firmwareDir);
+  
+  console.log(`[FIRMWARE] Scanning directory... Found ${files.length} files`);
+  
+  files.forEach(file => {
+    if (file.endsWith('.bin')) {
+      // Парсим имя файла: master_v1.0.1.bin или slave_v1.0.0.bin
+      const match = file.match(/(master|slave)_v([\d.]+)\.bin/i);
+      
+      if (match) {
+        const type = match[1].toLowerCase();
+        const version = match[2];
+        
+        if (type === 'master') {
+          firmwareVersions.master = {
+            version: version,
+            file: file,
+            uploaded: fs.statSync(path.join(firmwareDir, file)).mtime.toISOString()
+          };
+          console.log(`[FIRMWARE] ✓ Master loaded: ${file} v${version}`);
+        } else if (type === 'slave') {
+          firmwareVersions.slave = {
+            version: version,
+            file: file,
+            uploaded: fs.statSync(path.join(firmwareDir, file)).mtime.toISOString()
+          };
+          console.log(`[FIRMWARE] ✓ Slave loaded: ${file} v${version}`);
+        }
+      }
+    }
+  });
+}
+
+// ============================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ
 // ============================================
 
-// Текущее состояние ESP32
 let lastState = {
   engine: 'OFF',
   heater: 0,
@@ -138,33 +244,27 @@ let lastState = {
   timestamp: Date.now()
 };
 
-// Очередь команд для ESP32
 let commandQueue = [];
-
-// История выполненных команд (последние 100)
 let commandHistory = [];
 
-// Версии прошивок
 let firmwareVersions = {
   master: { version: '1.0.0', file: '', uploaded: null },
   slave: { version: '1.0.0', file: '', uploaded: null }
 };
 
-// Настройки энергосбережения
 let sleepSettings = {
-  dayStart: 6,        // День начинается с 6:00
-  dayEnd: 20,         // День заканчивается в 20:00
-  dayInterval: 300,   // Днём просыпаться каждые 300 сек (5 мин)
-  nightInterval: 900  // Ночью просыпаться каждые 900 сек (15 мин)
+  dayStart: 6,
+  dayEnd: 20,
+  dayInterval: 300,
+  nightInterval: 900
 };
 
-// Настройки таймера прогрева
 let heaterSchedule = {
   enabled: false,
   hour: 7,
   minute: 0,
   heaterLevel: 5,
-  preHeatTime: 180,  // 3 минуты прогрева до включения READY
+  preHeatTime: 180,
   autoReady: true
 };
 
@@ -176,17 +276,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
-// ФУНКЦИЯ: Запуск прогрева по таймеру
+// ФУНКЦИИ ТАЙМЕРА
 // ============================================
 
 function triggerHeaterSchedule() {
   console.log(`[SCHEDULE] Heater timer triggered at ${new Date().toISOString()}`);
   
-  // Шаг 1: Включаем отопитель
   const heaterCmd = `HEATER=1;LEVEL=${heaterSchedule.heaterLevel};`;
   commandQueue.push(heaterCmd);
   
-  // Добавляем в лог
   commandHistory.unshift({
     command: heaterCmd,
     status: 'SCHEDULED',
@@ -195,7 +293,6 @@ function triggerHeaterSchedule() {
   
   console.log(`[SCHEDULE] Queued: ${heaterCmd}`);
   
-  // Шаг 2: Через заданное время включаем ENGINE=READY (если включено)
   if (heaterSchedule.autoReady) {
     setTimeout(() => {
       const readyCmd = 'ENGINE=READY;';
@@ -212,10 +309,6 @@ function triggerHeaterSchedule() {
   }
 }
 
-// ============================================
-// ПРОВЕРКА ВРЕМЕНИ ДЛЯ ТАЙМЕРА (БЕЗ CRON)
-// ============================================
-
 function checkHeaterSchedule() {
   if (!heaterSchedule.enabled) return;
   
@@ -223,7 +316,6 @@ function checkHeaterSchedule() {
   const currentHour = now.getHours();
   const currentMinute = now.getMinutes();
   
-  // Проверяем точное время
   if (currentHour === heaterSchedule.hour && currentMinute === heaterSchedule.minute) {
     const lastTrigger = now.getTime();
     if (!global.lastHeaterTrigger || lastTrigger - global.lastHeaterTrigger > 60000) {
@@ -233,11 +325,10 @@ function checkHeaterSchedule() {
   }
 }
 
-// Проверяем каждые 30 секунд
 setInterval(checkHeaterSchedule, 30000);
 
 // ============================================
-// ГЛАВНАЯ СТРАНИЦА (Dashboard)
+// ГЛАВНАЯ СТРАНИЦА
 // ============================================
 
 app.get('/', (req, res) => {
@@ -531,14 +622,13 @@ setInterval(refresh,3000);
 });
 
 // ============================================
-// СТРАНИЦА НАСТРОЕК (Configuration)
+// СТРАНИЦА НАСТРОЕК (ЛОГИ ВНИЗУ)
 // ============================================
 
 app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
   const isOnline = stateAge < 120;
   
-  // Генерируем options для времени с получасами (0:00 - 23:30)
   let timeOptions = '';
   for(let h = 0; h <= 23; h++) {
     for(let m = 0; m < 60; m += 30) {
@@ -547,19 +637,16 @@ app.get('/config', (req, res) => {
     }
   }
   
-  // Генерируем options для минут (0-59)
   let minuteOptions = '';
   for(let i=0; i<=59; i++) {
     minuteOptions += `<option value="${i}">${String(i).padStart(2,'0')}</option>`;
   }
   
-  // Генерируем options для уровня отопителя (1-9)
   let levelOptions = '';
   for(let i=1; i<=9; i++) {
     levelOptions += `<option value="${i}">${i}</option>`;
   }
   
-  // Генерируем options для интервалов сна (1-3600 секунд)
   let intervalOptions = '';
   const intervals = [1, 5, 10, 30, 60, 120, 180, 300, 600, 900, 1800, 3600];
   intervals.forEach(sec => {
@@ -615,14 +702,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
   </div>
   
   <div class="card">
-    <div class="hdr">Command Log</div>
-    <div id="logWindow" class="log-window">
-      <div style="color:#6b7280;text-align:center">Waiting for commands...</div>
-    </div>
-    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">Shows all commands: engine, heater, doors, calibration, timers</div>
-  </div>
-  
-  <div class="card">
     <div class="hdr">🔥 Heater Auto-Start Timer</div>
     
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
@@ -649,7 +728,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <label style="margin-top:16px">Pre-heat Time</label>
     <select id="preHeatTime" class="select">${intervalOptions}</select>
-    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Warm-up duration before engine start</div>
     
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
       <strong>Auto Engine READY</strong>
@@ -661,13 +739,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <div style="height:16px"></div>
     <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
-    
-    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ Auto-start logic:</strong><br>
-      1. At set time → Heater ON<br>
-      2. After pre-heat → Engine READY<br>
-      3. Car ready to drive!
-    </div>
   </div>
   
   <div class="card">
@@ -679,7 +750,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div style="padding-top:8px">to</div>
       <select id="dayEnd" class="select time-select">${timeOptions}</select>
     </div>
-    <div style="font-size:12px;color:#9aa3b2;margin-top:4px">Frequent wake-ups during this period</div>
     
     <label style="margin-top:16px">Wake Interval (Day)</label>
     <select id="dayInterval" class="select">${intervalOptions}</select>
@@ -689,12 +759,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     
     <div style="height:16px"></div>
     <button class="btn primary" onclick="saveSleepSettings()">Save Energy Settings</button>
-    
-    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ Energy modes:</strong><br>
-      • Day: Quick response (e.g. 5min)<br>
-      • Night: Battery saving (e.g. 15min)
-    </div>
   </div>
   
   <div class="card">
@@ -728,8 +792,8 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
   <div class="card">
     <div class="hdr">OTA Firmware Updates</div>
     <div style="margin:12px 0">
-      <div><strong>Master:</strong> v${firmwareVersions.master.version}</div>
-      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version}</div>
+      <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '('+firmwareVersions.master.file+')' : ''}</div>
+      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '('+firmwareVersions.slave.file+')' : ''}</div>
     </div>
     
     <label>Upload Master Firmware (.bin)</label>
@@ -757,21 +821,25 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
   </div>
   
   <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
+  
+  <div class="card">
+    <div class="hdr">Command Log</div>
+    <div id="logWindow" class="log-window">
+      <div style="color:#6b7280;text-align:center">Waiting...</div>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">All commands: engine, heater, doors, calibration, timers</div>
+  </div>
 </div>
 
 <script>
-// Устанавливаем сохранённые значения
 document.getElementById('timerHour').value = ${heaterSchedule.hour};
 document.getElementById('timerMinute').value = ${heaterSchedule.minute};
 document.getElementById('timerLevel').value = ${heaterSchedule.heaterLevel};
 document.getElementById('preHeatTime').value = ${heaterSchedule.preHeatTime};
-
 document.getElementById('dayStart').value = '${sleepSettings.dayStart},0';
 document.getElementById('dayEnd').value = '${sleepSettings.dayEnd},0';
 document.getElementById('dayInterval').value = ${sleepSettings.dayInterval};
 document.getElementById('nightInterval').value = ${sleepSettings.nightInterval};
-
-// ========== ТАЙМЕР ПРОГРЕВА ==========
 
 async function saveHeaterSchedule() {
   const enabled = document.getElementById('timerEnabled').checked;
@@ -781,31 +849,19 @@ async function saveHeaterSchedule() {
   const preHeat = parseInt(document.getElementById('preHeatTime').value);
   const autoReady = document.getElementById('autoReady').checked;
   
-  const settings = {
-    enabled: enabled,
-    hour: hour,
-    minute: minute,
-    heaterLevel: level,
-    preHeatTime: preHeat,
-    autoReady: autoReady
-  };
-  
   const res = await fetch('/api/heater_schedule', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(settings)
+    body: JSON.stringify({enabled, hour, minute, heaterLevel: level, preHeatTime: preHeat, autoReady})
   });
   
   if(res.ok) {
-    alert('✓ Timer saved!\\n' + 
-          (enabled ? 'Start: ' + hour + ':' + String(minute).padStart(2,'0') : 'Disabled'));
+    alert('✓ Timer saved!');
     location.reload();
   } else {
-    alert('✗ Save failed');
+    alert('✗ Failed');
   }
 }
-
-// ========== ENERGY SAVING ==========
 
 async function saveSleepSettings() {
   const dayStartVal = document.getElementById('dayStart').value.split(',');
@@ -820,47 +876,30 @@ async function saveSleepSettings() {
     return;
   }
   
-  const settings = {
-    dayStart: dayStart,
-    dayEnd: dayEnd,
-    dayInterval: dayInterval,
-    nightInterval: nightInterval
-  };
-  
   const res = await fetch('/api/sleep_settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(settings)
+    body: JSON.stringify({dayStart, dayEnd, dayInterval, nightInterval})
   });
   
   if(res.ok) {
-    alert('✓ Energy settings saved!');
+    alert('✓ Saved!');
   } else {
-    alert('✗ Save failed');
+    alert('✗ Failed');
   }
 }
 
-// ========== КАЛИБРОВКА ==========
-
 async function setMlPerTick() {
   const val = document.getElementById('mlPerTick').value;
-  if(!val || val <= 0) { 
-    alert('Enter valid ml/tick'); 
-    return; 
-  }
-  
+  if(!val || val <= 0) { alert('Enter valid ml/tick'); return; }
   await fetch('/api/queue_cmd?cmd=MLPT='+val+';');
-  alert('✓ Command queued');
+  alert('✓ Queued');
   setTimeout(refresh, 1000);
 }
 
 async function sendRefill() {
   const val = document.getElementById('refilledMl').value;
-  if(!val || val <= 0) { 
-    alert('Enter refilled amount'); 
-    return; 
-  }
-  
+  if(!val || val <= 0) { alert('Enter amount'); return; }
   await fetch('/api/queue_cmd?cmd=REFILLED='+val+';');
   alert('✓ Refilled: ' + val + ' ml');
   document.getElementById('refilledMl').value = '';
@@ -868,22 +907,18 @@ async function sendRefill() {
 }
 
 async function resetCalib() {
-  if(!confirm('Reset calibration?')) return;
-  
+  if(!confirm('Reset?')) return;
   await fetch('/api/queue_cmd?cmd=RESET_CALIB=1;');
   alert('✓ Reset queued');
   setTimeout(refresh, 1000);
 }
 
 async function enableAuto() {
-  if(!confirm('Enable auto mode?')) return;
-  
+  if(!confirm('Enable auto?')) return;
   await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
-  alert('✓ Auto mode queued');
+  alert('✓ Auto queued');
   setTimeout(refresh, 1000);
 }
-
-// ========== ЛОГИ ==========
 
 let lastLogCount = 0;
 
@@ -940,8 +975,6 @@ async function loadLogs() {
   }
 }
 
-// ========== OTA ==========
-
 document.getElementById('masterForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('masterFile').files[0];
@@ -959,7 +992,7 @@ document.getElementById('masterForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Uploaded!');
+      alert('✓ Uploaded! (synced to GitHub)');
       location.reload(); 
     } else { 
       alert('✗ Failed'); 
@@ -990,7 +1023,7 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
     if(res.ok) { 
-      alert('✓ Uploaded!'); 
+      alert('✓ Uploaded! (synced to GitHub)'); 
       location.reload(); 
     } else { 
       alert('✗ Failed'); 
@@ -1003,8 +1036,6 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
     btn.textContent = 'Upload Slave';
   }
 });
-
-// ========== ОБНОВЛЕНИЕ ==========
 
 async function refresh() {
   try {
@@ -1045,12 +1076,10 @@ setInterval(updateServerTime, 1000);
 // API ENDPOINTS
 // ============================================
 
-// Получить текущее состояние
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
 
-// ESP32 отправляет обновление состояния
 app.get('/api/update', (req, res) => {
   const { engine, heater, level, batt, tank, cons, seq } = req.query;
   
@@ -1065,11 +1094,10 @@ app.get('/api/update', (req, res) => {
     timestamp: Date.now()
   };
 
-  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, level=${level}, batt=${batt}mV`);
+  console.log(`[${new Date().toISOString()}] ESP32 UPDATE: engine=${engine}, heater=${heater}, batt=${batt}mV`);
   res.send('OK');
 });
 
-// ESP32 запрашивает текущее время (NTP sync)
 app.get('/api/time', (req, res) => {
   const now = new Date();
   res.json({
@@ -1080,23 +1108,20 @@ app.get('/api/time', (req, res) => {
   });
 });
 
-// ESP32 запрашивает команды
 app.get('/api/cmd', (req, res) => {
   if (commandQueue.length === 0) {
     res.send('NONE');
   } else {
     const cmd = commandQueue.shift();
-    console.log(`[${new Date().toISOString()}] ESP32 CMD SENT: ${cmd}`);
+    console.log(`[${new Date().toISOString()}] CMD SENT: ${cmd}`);
     res.send(cmd);
   }
 });
 
-// ESP32 запрашивает настройки энергосбережения
 app.get('/api/sleep_config', (req, res) => {
   res.json(sleepSettings);
 });
 
-// Сохранить настройки энергосбережения
 app.post('/api/sleep_settings', (req, res) => {
   const { dayStart, dayEnd, dayInterval, nightInterval } = req.body;
   
@@ -1104,8 +1129,6 @@ app.post('/api/sleep_settings', (req, res) => {
   if (dayEnd !== undefined) sleepSettings.dayEnd = parseInt(dayEnd);
   if (dayInterval !== undefined) sleepSettings.dayInterval = parseInt(dayInterval);
   if (nightInterval !== undefined) sleepSettings.nightInterval = parseInt(nightInterval);
-  
-  console.log(`[${new Date().toISOString()}] Sleep settings updated:`, sleepSettings);
   
   const cmd = `SLEEP_CFG=${sleepSettings.dayStart},${sleepSettings.dayEnd},${sleepSettings.dayInterval},${sleepSettings.nightInterval};`;
   commandQueue.push(cmd);
@@ -1119,7 +1142,6 @@ app.post('/api/sleep_settings', (req, res) => {
   res.send('OK');
 });
 
-// Сохранить настройки таймера прогрева
 app.post('/api/heater_schedule', (req, res) => {
   const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
   
@@ -1135,15 +1157,11 @@ app.post('/api/heater_schedule', (req, res) => {
   res.send('OK');
 });
 
-// Веб добавляет команду в очередь
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;
-  if (!cmd) {
-    return res.status(400).send('Missing cmd parameter');
-  }
+  if (!cmd) return res.status(400).send('Missing cmd');
   
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
   
   commandHistory.unshift({
     command: cmd,
@@ -1157,15 +1175,10 @@ app.get('/api/queue_cmd', (req, res) => {
   res.send('OK');
 });
 
-// ESP32 отправляет подтверждение (ACK)
 app.get('/api/ack', (req, res) => {
   const { cmd, status } = req.query;
+  if (!cmd) return res.status(400).send('Missing cmd');
   
-  if (!cmd) {
-    return res.status(400).send('Missing cmd parameter');
-  }
-  
-  // Обновляем статус команды в истории
   const existingEntry = commandHistory.find(e => e.command === cmd && e.status === 'QUEUED');
   if (existingEntry) {
     existingEntry.status = status || 'OK';
@@ -1179,17 +1192,13 @@ app.get('/api/ack', (req, res) => {
   
   if (commandHistory.length > 100) commandHistory.pop();
   
-  console.log(`[${new Date().toISOString()}] ESP32 ACK: ${cmd} → ${status || 'OK'}`);
-  
   res.send('OK');
 });
 
-// Получить историю команд
 app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
 
-// Применить команду к локальному состоянию (мгновенное обновление UI)
 function applyCommandToState(cmdLine) {
   const parts = cmdLine.split(';');
   parts.forEach(part => {
@@ -1213,89 +1222,107 @@ function applyCommandToState(cmdLine) {
   lastState.timestamp = Date.now();
 }
 
-// Очистить очередь команд
 app.post('/api/clear_queue', (req, res) => {
   const cleared = commandQueue.length;
   commandQueue = [];
-  console.log(`[${new Date().toISOString()}] Queue cleared (${cleared} commands)`);
   res.send('OK');
 });
 
 // ============================================
-// OTA ENDPOINTS
+// OTA ENDPOINTS (с GitHub Auto-Sync)
 // ============================================
 
-// Загрузка прошивки Master
-app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
+app.post('/api/ota/upload/master', upload.single('firmware'), async (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
   }
   
+  const filename = `master_v${req.body.version}.bin`;
+  const newPath = path.join(__dirname, 'firmware', filename);
+  
+  // Переименовываем файл
+  fs.renameSync(req.file.path, newPath);
+  
   firmwareVersions.master = {
     version: req.body.version,
-    file: req.file.filename,
+    file: filename,
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Master uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  console.log(`[OTA] Master uploaded: ${filename} (${req.file.size} bytes)`);
+  
+  // Загружаем в GitHub
+  const fileBuffer = fs.readFileSync(newPath);
+  const githubSuccess = await uploadToGitHub(filename, fileBuffer);
+  
+  if (githubSuccess) {
+    console.log(`[OTA] Master also uploaded to GitHub`);
+  }
   
   commandQueue.push('MASTER_UPDATE=' + req.body.version + ';');
   
   res.send('OK');
 });
 
-// Загрузка прошивки Slave
-app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
+app.post('/api/ota/upload/slave', upload.single('firmware'), async (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
   }
   
+  const filename = `slave_v${req.body.version}.bin`;
+  const newPath = path.join(__dirname, 'firmware', filename);
+  
+  // Переименовываем файл
+  fs.renameSync(req.file.path, newPath);
+  
   firmwareVersions.slave = {
     version: req.body.version,
-    file: req.file.filename,
+    file: filename,
     uploaded: new Date().toISOString()
   };
   
-  console.log(`[OTA] Slave uploaded: ${req.file.filename} v${req.body.version} (${req.file.size} bytes)`);
+  console.log(`[OTA] Slave uploaded: ${filename} (${req.file.size} bytes)`);
+  
+  // Загружаем в GitHub
+  const fileBuffer = fs.readFileSync(newPath);
+  const githubSuccess = await uploadToGitHub(filename, fileBuffer);
+  
+  if (githubSuccess) {
+    console.log(`[OTA] Slave also uploaded to GitHub`);
+  }
   
   commandQueue.push('SLAVE_UPDATE=' + req.body.version + ';');
   
   res.send('OK');
 });
 
-// Проверка версии Master
 app.get('/api/ota/version/master', (req, res) => {
   res.json({ version: firmwareVersions.master.version });
 });
 
-// Проверка версии Slave
 app.get('/api/ota/version/slave', (req, res) => {
   res.json({ version: firmwareVersions.slave.version });
 });
 
-// Скачивание прошивки Master
 app.get('/api/ota/firmware/master', (req, res) => {
   if (!firmwareVersions.master.file) {
-    return res.status(404).send('No firmware available');
+    return res.status(404).send('No firmware');
   }
   const filePath = path.join(__dirname, 'firmware', firmwareVersions.master.file);
   if (!fs.existsSync(filePath)) {
-    return res.status(404).send('Firmware file not found');
+    return res.status(404).send('File not found');
   }
-  console.log(`[OTA] Master download: ${firmwareVersions.master.file}`);
   res.download(filePath);
 });
 
-// Скачивание прошивки Slave
 app.get('/api/ota/firmware/slave', (req, res) => {
   if (!firmwareVersions.slave.file) {
-    return res.status(404).send('No firmware available');
+    return res.status(404).send('No firmware');
   }
   const filePath = path.join(__dirname, 'firmware', firmwareVersions.slave.file);
   if (!fs.existsSync(filePath)) {
-    return res.status(404).send('Firmware file not found');
+    return res.status(404).send('File not found');
   }
-  console.log(`[OTA] Slave download: ${firmwareVersions.slave.file}`);
   res.download(filePath);
 });
 
@@ -1304,18 +1331,18 @@ app.get('/api/ota/firmware/slave', (req, res) => {
 // ============================================
 
 app.listen(port, () => {
+  // Загружаем прошивки из папки firmware/
+  loadFirmwareFromDirectory();
+  
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`🚗 Peugeotion Server v2.0.0 Started`);
+  console.log(`🚗 Peugeotion Server v2.1.0 Started`);
   console.log(`${'='.repeat(60)}`);
   console.log(`📍 Port: ${port}`);
   console.log(`🌐 URL: https://peugeotion.onrender.com`);
-  console.log(`📡 ESP32 Endpoints:`);
-  console.log(`   GET  /api/update    - ESP32 sends state`);
-  console.log(`   GET  /api/cmd       - ESP32 gets commands`);
-  console.log(`   GET  /api/time      - Time sync (NTP)`);
-  console.log(`   GET  /api/ack       - Command confirmation`);
-  console.log(`   GET  /api/sleep_config - Energy settings`);
-  console.log(`🔥 Heater Timer: ${heaterSchedule.enabled ? `⏰ ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')}` : '❌ DISABLED'}`);
-  console.log(`⚡ Energy Mode: Day ${sleepSettings.dayStart}:00-${sleepSettings.dayEnd}:00`);
+  console.log(`🔥 Heater: ${heaterSchedule.enabled ? `⏰ ${heaterSchedule.hour}:${String(heaterSchedule.minute).padStart(2, '0')}` : '❌ Disabled'}`);
+  console.log(`📦 Firmware:`);
+  console.log(`   Master: v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '('+firmwareVersions.master.file+')' : '(none)'}`);
+  console.log(`   Slave:  v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '('+firmwareVersions.slave.file+')' : '(none)'}`);
+  console.log(`📁 GitHub: ${GITHUB_TOKEN && GITHUB_REPO ? '✓ Connected to '+GITHUB_REPO : '✗ Not configured'}`);
   console.log(`${'='.repeat(60)}\n`);
 });

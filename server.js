@@ -24,7 +24,7 @@ let commandQueue = [];
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ---------- ГЛАВНАЯ СТРАНИЦА (ТВО ДИЗАЙН ИЗ dashboard_html) ----------
+// ---------- ГЛАВНАЯ СТРАНИЦА ----------
 
 app.get('/', (req, res) => {
   res.send(`
@@ -88,6 +88,7 @@ app.get('/', (req, res) => {
     <div class="row space"><span>Heater Status:</span><span id="heaterStatus" class="badge">--</span></div>
     <div class="row space"><span>Fuel Consumed:</span><span id="fuelTag" class="badge">--</span></div>
   </div>
+  <button class="btn" onclick="location.href='/config'">Settings</button>
 </div>
 <script>
 let state={engine:'OFF',heater:false,level:0};
@@ -285,6 +286,85 @@ setInterval(refresh,3000);
   `);
 });
 
+// ---------- СТРАНИЦА НАСТРОЕК (ТВО ДИЗАЙН ИЗ config.html) ----------
+
+app.get('/config', (req, res) => {
+  const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
+  const isOnline = stateAge < 120;
+  
+  res.send(`
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configuration</title>
+<style>
+:root{--bg:#0f1420;--panel:#1c2333;--txt:#e6e8ef;--muted:#9aa3b2;--accent:#d94f4f;--ok:#32d583;--info:#3b82f6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,system-ui,Arial}.wrap{max-width:500px;margin:0 auto;padding:16px}
+.card{background:#1c2333;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.35);margin:14px 0}.hdr{font-weight:800;font-size:18px;margin-bottom:12px}
+.btn{padding:12px 16px;border-radius:10px;background:#39425e;border:none;color:#e9edf4;cursor:pointer;font-size:14px;font-weight:600}
+.btn.primary{background:#3b82f6}.btn.danger{background:#d84d4d}.btn.success{background:#24a06b}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0}
+.list-item{background:#2a3246;padding:12px;border-radius:8px;margin:8px 0;display:flex;justify-content:space-between;align-items:center}
+.list-item .name{font-weight:600}
+.list-item .actions{display:flex;gap:8px}
+.online{color:#32d583}.offline{color:#d84d4f}
+</style></head><body>
+<div class="wrap">
+  <div class="card">
+    <div class="hdr">System Status</div>
+    <div style="margin:12px 0">
+      <div><strong>Server:</strong> Render.com</div>
+      <div style="margin-top:8px"><strong>ESP32 Status:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
+      <div style="margin-top:8px"><strong>Last Update:</strong> ${stateAge}s ago</div>
+      <div style="margin-top:8px"><strong>Queued Commands:</strong> ${commandQueue.length}</div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">ESP32 Data</div>
+    <div style="margin:12px 0">
+      <div><strong>Engine:</strong> <span id="engine">${lastState.engine}</span></div>
+      <div style="margin-top:8px"><strong>Heater:</strong> <span id="heater">${lastState.heater?'ON':'OFF'}</span></div>
+      <div style="margin-top:8px"><strong>Level:</strong> <span id="level">${lastState.level}/9</span></div>
+      <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
+      <div style="margin-top:8px"><strong>Tank:</strong> <span id="tank">${lastState.tank} ml</span></div>
+      <div style="margin-top:8px"><strong>Consumed:</strong> <span id="cons">${lastState.cons} ml</span></div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">Command Queue</div>
+    <div id="queueList" style="margin:12px 0">
+      ${commandQueue.length === 0 ? '<p style="color:#9aa3b2;font-size:14px">No commands queued</p>' : 
+        commandQueue.map((cmd, i) => `<div class="list-item"><div class="name">${cmd}</div></div>`).join('')}
+    </div>
+    <button class="btn danger" onclick="clearQueue()">Clear Queue</button>
+  </div>
+  
+  <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
+</div>
+
+<script>
+async function clearQueue() {
+  await fetch('/api/clear_queue', {method: 'POST'});
+  location.reload();
+}
+
+setInterval(() => {
+  fetch('/api/state').then(r => r.json()).then(js => {
+    document.getElementById('engine').textContent = js.engine;
+    document.getElementById('heater').textContent = js.heater ? 'ON' : 'OFF';
+    document.getElementById('level').textContent = js.level + '/9';
+    document.getElementById('batt').textContent = (js.batt/1000).toFixed(2) + 'V';
+    document.getElementById('tank').textContent = js.tank + ' ml';
+    document.getElementById('cons').textContent = js.cons + ' ml';
+  });
+}, 3000);
+</script>
+</body></html>
+  `);
+});
+
 // ---------- API ----------
 
 app.get('/api/state', (req, res) => {
@@ -327,6 +407,12 @@ app.get('/api/queue_cmd', (req, res) => {
   }
   commandQueue.push(cmd);
   console.log(`[${new Date().toISOString()}] WEB CMD queued: ${cmd}`);
+  res.send('OK');
+});
+
+app.post('/api/clear_queue', (req, res) => {
+  commandQueue = [];
+  console.log(`[${new Date().toISOString()}] Queue cleared`);
   res.send('OK');
 });
 

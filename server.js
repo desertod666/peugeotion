@@ -131,7 +131,7 @@ function colorizePower(){
 function setEngine(e){
   fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
   state.engine=e;
-  refresh();
+  updateUI();
 }
 
 function nearestSlot(px,w){
@@ -173,18 +173,9 @@ function drawHeatSegs(n){
   }
 }
 
-async function refresh() {
-  const r=await fetch('/api/state');
-  const js=await r.json();
-  state.engine=js.engine;
-  state.heater=js.heater;
-  state.level=js.level;
-  
+function updateUI(){
   document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
   document.getElementById('engBadge').textContent=state.engine;
-  document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
-  document.getElementById('tankTag').textContent=js.tank+' ml';
-  document.getElementById('fuelTag').textContent=js.cons+' ml';
   
   colorizePower();
   moveKnob(state.engine);
@@ -195,28 +186,51 @@ async function refresh() {
   drawHeatSegs(state.level);
 }
 
+async function refresh() {
+  try {
+    const r=await fetch('/api/state');
+    const js=await r.json();
+    state.engine=js.engine;
+    state.heater=js.heater;
+    state.level=js.level;
+    
+    document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
+    document.getElementById('tankTag').textContent=js.tank+' ml';
+    document.getElementById('fuelTag').textContent=js.cons+' ml';
+    
+    updateUI();
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
 function setHeater(on){
   fetch('/api/queue_cmd?cmd=HEATER='+(on?1:0)+';');
   state.heater=on;
   if(!on) state.level=0;
-  refresh();
+  updateUI();
 }
 
 function setHeaterLevel(lv){
   fetch('/api/queue_cmd?cmd=LEVEL='+lv+';');
   state.level=lv;
-  refresh();
+  updateUI();
 }
 
 power.addEventListener('pointerdown',e=>{
+  e.preventDefault();
   beforeHold=state.engine;
   pressT=Date.now();
   clearTimeout(holdTimer);
   tempIgn=false;
-  holdTimer=setTimeout(()=>{tempIgn=true;setEngine('IGN');},1000);
+  holdTimer=setTimeout(()=>{
+    tempIgn=true;
+    setEngine('IGN');
+  },1000);
 });
 
 power.addEventListener('pointerup',e=>{
+  e.preventDefault();
   const dt=Date.now()-pressT;
   clearTimeout(holdTimer);
   if(dt<1000){
@@ -231,6 +245,7 @@ power.addEventListener('pointerup',e=>{
 
 let drag=false,startX=0,startLeft=0;
 slider.addEventListener('pointerdown',e=>{
+  e.preventDefault();
   drag=true;
   slider.setPointerCapture(e.pointerId);
   startX=e.clientX;
@@ -239,6 +254,7 @@ slider.addEventListener('pointerdown',e=>{
 
 slider.addEventListener('pointermove',e=>{
   if(!drag)return;
+  e.preventDefault();
   const w=slider.clientWidth;
   let x=startLeft+(e.clientX-startX);
   x=Math.max(0,Math.min(w-70,x));
@@ -246,22 +262,28 @@ slider.addEventListener('pointermove',e=>{
 });
 
 slider.addEventListener('pointerup',e=>{
+  e.preventDefault();
+  if(!drag)return;
   drag=false;
   const w=slider.clientWidth;
   const slot=nearestSlot(knob.offsetLeft,w);
   const label=slotToLabel(slot);
-  moveKnob(label);
   setEngine(label);
 });
 
-heaterBtn.addEventListener('click',()=>{setHeater(!state.heater);});
+heaterBtn.addEventListener('click',e=>{
+  e.preventDefault();
+  setHeater(!state.heater);
+});
 
-document.getElementById('heatPlus').addEventListener('click',()=>{
+document.getElementById('heatPlus').addEventListener('click',e=>{
+  e.preventDefault();
   let n=Math.min(9,state.level+1);
   setHeaterLevel(n);
 });
 
-document.getElementById('heatMinus').addEventListener('click',()=>{
+document.getElementById('heatMinus').addEventListener('click',e=>{
+  e.preventDefault();
   let n=Math.max(1,state.level-1);
   setHeaterLevel(n);
 });
@@ -276,12 +298,13 @@ function doorCenter(){
 
 function doorDo(act){
   fetch('/api/queue_cmd?cmd=DOOR='+act+';');
-  doorCenter();
+  setTimeout(doorCenter, 300);
 }
 
 doorCenter();
 
 doorSlider.addEventListener('pointerdown',e=>{
+  e.preventDefault();
   dDrag=true;
   doorSlider.setPointerCapture(e.pointerId);
   dStartX=e.clientX;
@@ -290,6 +313,7 @@ doorSlider.addEventListener('pointerdown',e=>{
 
 doorSlider.addEventListener('pointermove',e=>{
   if(!dDrag)return;
+  e.preventDefault();
   const w=doorSlider.clientWidth;
   let x=dStartLeft+(e.clientX-dStartX);
   x=Math.max(0,Math.min(w-64,x));
@@ -297,6 +321,8 @@ doorSlider.addEventListener('pointermove',e=>{
 });
 
 doorSlider.addEventListener('pointerup',e=>{
+  e.preventDefault();
+  if(!dDrag)return;
   dDrag=false;
   const w=doorSlider.clientWidth;
   const center=(w-64)/2;
@@ -307,6 +333,7 @@ doorSlider.addEventListener('pointerup',e=>{
   else doorCenter();
 });
 
+updateUI();
 refresh();
 setInterval(refresh,5000);
 </script>
@@ -314,7 +341,7 @@ setInterval(refresh,5000);
   `);
 });
 
-// ---------- СТРАНИЦА НАСТРОЕК С OTA ----------
+// ---------- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ----------
 
 app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
@@ -443,8 +470,6 @@ setInterval(() => {
   `);
 });
 
-// ---------- API ----------
-
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
@@ -494,9 +519,6 @@ app.post('/api/clear_queue', (req, res) => {
   res.send('OK');
 });
 
-// ---------- OTA API ----------
-
-// Загрузка прошивки
 app.post('/api/ota/upload/master', upload.single('firmware'), (req, res) => {
   if (!req.file || !req.body.version) {
     return res.status(400).send('Missing firmware or version');
@@ -523,7 +545,6 @@ app.post('/api/ota/upload/slave', upload.single('firmware'), (req, res) => {
   res.send('OK');
 });
 
-// Проверка версии (для ESP32)
 app.get('/api/ota/version/master', (req, res) => {
   res.json({ version: firmwareVersions.master.version });
 });
@@ -532,7 +553,6 @@ app.get('/api/ota/version/slave', (req, res) => {
   res.json({ version: firmwareVersions.slave.version });
 });
 
-// Скачивание прошивки (для ESP32)
 app.get('/api/ota/firmware/master', (req, res) => {
   if (!firmwareVersions.master.file) {
     return res.status(404).send('No firmware available');
@@ -550,8 +570,6 @@ app.get('/api/ota/firmware/slave', (req, res) => {
   console.log(`[OTA] Slave firmware download: ${firmwareVersions.slave.file}`);
   res.download(filePath);
 });
-
-// ---------- ЗАПУСК ----------
 
 app.listen(port, () => {
   console.log(`🚗 Peugeotion server running on port ${port}`);

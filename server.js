@@ -23,7 +23,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// Состояние ESP32
+// Состояние ESP32 (это источник истины!)
 let lastState = {
   engine: 'OFF',
   heater: 0,
@@ -88,7 +88,7 @@ app.get('/', (req, res) => {
     <div id="heaterCtl" style="display:none">
       <div class="row space" style="margin-top:10px">
         <button id="heatMinus" class="btn gray" style="width:90px">−</button>
-        <span class="tag" id="heatLvlTag">Level: 0/9</span>
+        <span class="tag" id="heatLvlTag">Level: 1/9</span>
         <button id="heatPlus" class="btn gray" style="width:90px">＋</button>
       </div>
       <div id="heatSegs" style="height:10px;background:#2a3246;border-radius:8px;display:flex;gap:4px;margin-top:10px"></div>
@@ -115,7 +115,7 @@ app.get('/', (req, res) => {
   <button class="btn" onclick="location.href='/config'">Settings</button>
 </div>
 <script>
-let state={engine:'OFF',heater:false,level:0};
+let state={engine:'OFF',heater:0,level:1};
 let pressT=0,holdTimer=null,tempIgn=false,beforeHold='OFF';
 const power=document.getElementById('power'), knob=document.getElementById('knob'), slider=document.getElementById('engSlider');
 const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
@@ -132,8 +132,7 @@ function colorizePower(){
 
 function setEngine(e){
   fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
-  state.engine=e;
-  updateUI();
+  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 function nearestSlot(px,w){
@@ -192,6 +191,8 @@ async function refresh() {
   try {
     const r=await fetch('/api/state');
     const js=await r.json();
+    
+    // Обновляем состояние ТОЛЬКО от сервера
     state.engine=js.engine;
     state.heater=js.heater;
     state.level=js.level;
@@ -207,16 +208,16 @@ async function refresh() {
 }
 
 function setHeater(on){
-  fetch('/api/queue_cmd?cmd=HEATER='+(on?1:0)+';');
-  state.heater=on;
-  if(!on) state.level=0;
-  updateUI();
+  const cmd = on ? 'HEATER=1;LEVEL=1;' : 'HEATER=0;';
+  fetch('/api/queue_cmd?cmd='+cmd);
+  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 function setHeaterLevel(lv){
+  if(lv<1) lv=1;
+  if(lv>9) lv=9;
   fetch('/api/queue_cmd?cmd=LEVEL='+lv+';');
-  state.level=lv;
-  updateUI();
+  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 power.addEventListener('pointerdown',e=>{
@@ -337,7 +338,7 @@ doorSlider.addEventListener('pointerup',e=>{
 
 updateUI();
 refresh();
-setInterval(refresh,5000);
+setInterval(refresh,3000);
 </script>
 </body></html>
   `);
@@ -363,8 +364,6 @@ app.get('/config', (req, res) => {
 .btn.primary{background:#3b82f6}.btn.danger{background:#d84d4d}.btn.success{background:#24a06b}
 .btn:disabled{opacity:0.5;cursor:not-allowed}
 .input{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:14px;margin:8px 0;box-sizing:border-box}
-.list-item{background:#2a3246;padding:12px;border-radius:8px;margin:8px 0;display:flex;justify-content:space-between;align-items:center}
-.list-item .name{font-weight:600;font-family:monospace;font-size:13px}
 .online{color:#32d583}.offline{color:#d84d4f}
 label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </style></head><body>
@@ -375,7 +374,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div><strong>Platform:</strong> Render.com</div>
       <div style="margin-top:8px"><strong>ESP32 Connection:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span></div>
       <div style="margin-top:8px"><strong>Last Update:</strong> ${stateAge}s ago</div>
-      <div style="margin-top:8px"><strong>Queued Commands:</strong> ${commandQueue.length}</div>
     </div>
   </div>
   
@@ -419,15 +417,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <div style="margin-top:8px"><strong>Consumed:</strong> <span id="cons">${lastState.cons} ml</span></div>
       <div style="margin-top:8px"><strong>Sequence:</strong> #${lastState.seq}</div>
     </div>
-  </div>
-  
-  <div class="card">
-    <div class="hdr">Command Queue</div>
-    <div id="queueList" style="margin:12px 0">
-      ${commandQueue.length === 0 ? '<p style="color:#9aa3b2;font-size:14px">No commands in queue</p>' : 
-        commandQueue.map((cmd, i) => `<div class="list-item"><div class="name">${i+1}. ${cmd}</div></div>`).join('')}
-    </div>
-    ${commandQueue.length > 0 ? '<button class="btn danger" onclick="clearQueue()">Clear Queue</button>' : ''}
   </div>
   
   <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
@@ -496,12 +485,6 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   }
 });
 
-async function clearQueue() {
-  if(!confirm('Clear all queued commands?')) return;
-  await fetch('/api/clear_queue', {method: 'POST'});
-  location.reload();
-}
-
 setInterval(() => {
   fetch('/api/state').then(r => r.json()).then(js => {
     document.getElementById('engine').textContent = js.engine;
@@ -532,7 +515,7 @@ app.get('/api/update', (req, res) => {
   lastState = {
     engine: engine || 'OFF',
     heater: parseInt(heater) || 0,
-    level: parseInt(level) || 0,
+    level: parseInt(level) || 1,
     batt: parseInt(batt) || 0,
     tank: parseInt(tank) || 0,
     cons: parseInt(cons) || 0,
@@ -561,10 +544,39 @@ app.get('/api/queue_cmd', (req, res) => {
   if (!cmd) {
     return res.status(400).send('Missing cmd parameter');
   }
+  
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd} (queue: ${commandQueue.length})`);
+  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
+  
+  // Применяем команду сразу к состоянию сервера
+  applyCommandToState(cmd);
+  
   res.send('OK');
 });
+
+// Применить команду к состоянию сервера (для мгновенного отображения)
+function applyCommandToState(cmdLine) {
+  const parts = cmdLine.split(';');
+  parts.forEach(part => {
+    if (!part.trim()) return;
+    const [key, val] = part.split('=').map(s => s.trim());
+    
+    if (key === 'ENGINE') {
+      lastState.engine = val;
+    } else if (key === 'HEATER') {
+      lastState.heater = parseInt(val);
+      if (lastState.heater === 0) lastState.level = 0;
+      else if (lastState.level === 0) lastState.level = 1;
+    } else if (key === 'LEVEL') {
+      const lvl = parseInt(val);
+      if (lvl >= 1 && lvl <= 9) {
+        lastState.level = lvl;
+        if (lastState.heater === 0) lastState.heater = 1;
+      }
+    }
+  });
+  lastState.timestamp = Date.now();
+}
 
 // Очистить очередь команд
 app.post('/api/clear_queue', (req, res) => {

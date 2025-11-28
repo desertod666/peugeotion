@@ -27,7 +27,7 @@ const upload = multer({ storage: storage });
 let lastState = {
   engine: 'OFF',
   heater: 0,
-  level: 0,
+  level: 1,
   batt: 0,
   tank: 0,
   cons: 0,
@@ -132,7 +132,6 @@ function colorizePower(){
 
 function setEngine(e){
   fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
-  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 function nearestSlot(px,w){
@@ -192,7 +191,6 @@ async function refresh() {
     const r=await fetch('/api/state');
     const js=await r.json();
     
-    // Обновляем состояние ТОЛЬКО от сервера
     state.engine=js.engine;
     state.heater=js.heater;
     state.level=js.level;
@@ -210,14 +208,12 @@ async function refresh() {
 function setHeater(on){
   const cmd = on ? 'HEATER=1;LEVEL=1;' : 'HEATER=0;';
   fetch('/api/queue_cmd?cmd='+cmd);
-  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 function setHeaterLevel(lv){
   if(lv<1) lv=1;
   if(lv>9) lv=9;
   fetch('/api/queue_cmd?cmd=LEVEL='+lv+';');
-  // НЕ обновляем локально — ждём ответа от сервера
 }
 
 power.addEventListener('pointerdown',e=>{
@@ -378,6 +374,43 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
   </div>
   
   <div class="card">
+    <div class="hdr">Slave Device Data</div>
+    <div style="margin:12px 0">
+      <div><strong>Tank:</strong> <span id="slaveTank">${lastState.tank}</span> ml</div>
+      <div style="margin-top:8px"><strong>Consumed:</strong> <span id="slaveConsumed">${lastState.cons}</span> ml</div>
+      <div style="margin-top:8px"><strong>ml/tick:</strong> <span id="slaveMlpt">--</span></div>
+      <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
+    </div>
+  </div>
+  
+  <div class="card">
+    <div class="hdr">Fuel Calibration</div>
+    
+    <label>Set ml per tick</label>
+    <input type="number" id="mlPerTick" class="input" placeholder="e.g. 0.03" step="0.00001" value="0.03">
+    <button class="btn" onclick="setMlPerTick()">Set ml/tick</button>
+    
+    <div style="height:12px"></div>
+    
+    <label>Tank Refilled (ml)</label>
+    <input type="number" id="refilledMl" class="input" placeholder="How many ml did you refill?" step="1">
+    <button class="btn success" onclick="sendRefill()">Refilled</button>
+    
+    <div style="height:12px"></div>
+    
+    <button class="btn danger" onclick="resetCalib()">Reset Calibration</button>
+    <button class="btn" onclick="enableAuto()">Enable Auto Mode</button>
+    
+    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
+      <strong>ℹ️ Calibration:</strong><br>
+      • <strong>ml/tick</strong>: Set flow rate (adjust based on real consumption)<br>
+      • <strong>Refilled</strong>: After filling tank, enter amount to update level<br>
+      • <strong>Reset</strong>: Clears all calibration data and consumption history<br>
+      • <strong>Auto Mode</strong>: Enables automatic heater control
+    </div>
+  </div>
+  
+  <div class="card">
     <div class="hdr">OTA Firmware Updates</div>
     <div style="margin:12px 0">
       <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '✓ '+firmwareVersions.master.file : '(no firmware)'}</div>
@@ -397,14 +430,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       <input type="text" id="slaveVer" class="input" placeholder="Version (e.g. 1.0.1)" required>
       <button type="submit" class="btn primary">Upload Slave Firmware</button>
     </form>
-    
-    <div style="margin-top:16px;padding:12px;background:#2a3246;border-radius:8px;font-size:13px;line-height:1.6">
-      <strong>ℹ️ How it works:</strong><br>
-      • Upload .bin file and version<br>
-      • Server automatically sends update command to ESP32<br>
-      • Master updates itself directly<br>
-      • Slave connects to WiFi, updates, then returns to UART mode
-    </div>
   </div>
   
   <div class="card">
@@ -412,9 +437,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <div style="margin:12px 0">
       <div><strong>Engine:</strong> <span id="engine">${lastState.engine}</span></div>
       <div style="margin-top:8px"><strong>Heater:</strong> <span id="heater">${lastState.heater?'ON ('+lastState.level+')':'OFF'}</span></div>
-      <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
-      <div style="margin-top:8px"><strong>Fuel Tank:</strong> <span id="tank">${lastState.tank} ml</span></div>
-      <div style="margin-top:8px"><strong>Consumed:</strong> <span id="cons">${lastState.cons} ml</span></div>
       <div style="margin-top:8px"><strong>Sequence:</strong> #${lastState.seq}</div>
     </div>
   </div>
@@ -423,6 +445,51 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 </div>
 
 <script>
+// ========== КАЛИБРОВКА ТОПЛИВА ==========
+
+async function setMlPerTick() {
+  const val = document.getElementById('mlPerTick').value;
+  if(!val || val <= 0) { 
+    alert('Please enter valid ml/tick value'); 
+    return; 
+  }
+  
+  await fetch('/api/queue_cmd?cmd=MLPT='+val+';');
+  alert('✓ ml/tick command queued: ' + val);
+  setTimeout(refresh, 1000);
+}
+
+async function sendRefill() {
+  const val = document.getElementById('refilledMl').value;
+  if(!val || val <= 0) { 
+    alert('Please enter refilled amount in ml'); 
+    return; 
+  }
+  
+  await fetch('/api/queue_cmd?cmd=REFILLED='+val+';');
+  alert('✓ Refilled command queued: ' + val + ' ml');
+  document.getElementById('refilledMl').value = '';
+  setTimeout(refresh, 1000);
+}
+
+async function resetCalib() {
+  if(!confirm('Reset all calibration data and consumption history?')) return;
+  
+  await fetch('/api/queue_cmd?cmd=RESET_CALIB=1;');
+  alert('✓ Reset calibration command queued');
+  setTimeout(refresh, 1000);
+}
+
+async function enableAuto() {
+  if(!confirm('Enable automatic heater control mode?')) return;
+  
+  await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
+  alert('✓ Auto mode command queued');
+  setTimeout(refresh, 1000);
+}
+
+// ========== OTA ЗАГРУЗКА ==========
+
 document.getElementById('masterForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = document.getElementById('masterFile').files[0];
@@ -485,15 +552,26 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   }
 });
 
-setInterval(() => {
-  fetch('/api/state').then(r => r.json()).then(js => {
+// ========== ОБНОВЛЕНИЕ ДАННЫХ ==========
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/state');
+    const js = await r.json();
+    
     document.getElementById('engine').textContent = js.engine;
     document.getElementById('heater').textContent = js.heater ? 'ON ('+js.level+')' : 'OFF';
     document.getElementById('batt').textContent = (js.batt/1000).toFixed(2) + 'V';
-    document.getElementById('tank').textContent = js.tank + ' ml';
-    document.getElementById('cons').textContent = js.cons + ' ml';
-  });
-}, 5000);
+    document.getElementById('slaveTank').textContent = js.tank;
+    document.getElementById('slaveConsumed').textContent = js.cons;
+    document.getElementById('slaveMlpt').textContent = '0.03000';
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
 </script>
 </body></html>
   `);
@@ -546,7 +624,7 @@ app.get('/api/queue_cmd', (req, res) => {
   }
   
   commandQueue.push(cmd);
-  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd}`);
+  console.log(`[${new Date().toISOString()}] WEB CMD QUEUED: ${cmd} (queue: ${commandQueue.length})`);
   
   // Применяем команду сразу к состоянию сервера
   applyCommandToState(cmd);
@@ -574,6 +652,8 @@ function applyCommandToState(cmdLine) {
         if (lastState.heater === 0) lastState.heater = 1;
       }
     }
+    // Команды калибровки (MLPT, REFILLED, RESET_CALIB, ENABLE_AUTO)
+    // просто добавляются в очередь, состояние не меняют
   });
   lastState.timestamp = Date.now();
 }

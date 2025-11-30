@@ -272,57 +272,6 @@ let heaterSchedule = {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ============================================
-// ФУНКЦИИ ТАЙМЕРА
-// ============================================
-
-function triggerHeaterSchedule() {
-  console.log(`[SCHEDULE] Heater timer triggered at ${new Date().toISOString()}`);
-  
-  const heaterCmd = `HEATER=1;LEVEL=${heaterSchedule.heaterLevel};`;
-  commandQueue.push(heaterCmd);
-  
-  commandHistory.unshift({
-    command: heaterCmd,
-    status: 'SCHEDULED',
-    timestamp: new Date().toISOString()
-  });
-  
-  console.log(`[SCHEDULE] Queued: ${heaterCmd}`);
-  
-  if (heaterSchedule.autoReady) {
-    setTimeout(() => {
-      const readyCmd = 'ENGINE=READY;';
-      commandQueue.push(readyCmd);
-      
-      commandHistory.unshift({
-        command: readyCmd,
-        status: 'SCHEDULED',
-        timestamp: new Date().toISOString()
-      });
-      
-      console.log(`[SCHEDULE] Queued (after ${heaterSchedule.preHeatTime}s): ${readyCmd}`);
-    }, heaterSchedule.preHeatTime * 1000);
-  }
-}
-
-function checkHeaterSchedule() {
-  if (!heaterSchedule.enabled) return;
-  
-  const now = new Date();
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
-  
-  if (currentHour === heaterSchedule.hour && currentMinute === heaterSchedule.minute) {
-    const lastTrigger = now.getTime();
-    if (!global.lastHeaterTrigger || lastTrigger - global.lastHeaterTrigger > 60000) {
-      global.lastHeaterTrigger = lastTrigger;
-      triggerHeaterSchedule();
-    }
-  }
-}
-
-// setInterval(checkHeaterSchedule, 30000);
 
 // ============================================
 // ГЛАВНАЯ СТРАНИЦА

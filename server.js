@@ -430,22 +430,26 @@ function updateUI(){
 // SERVER SYNC
 async function refresh() {
   try {
-    const r=await fetch('/api/state');
-    const js=await r.json();
+    const r = await fetch('/api/state');
+    const js = await r.json();
 
-    state.engine=js.engine;
-    state.heater=js.heater;
-    state.level=js.level;
+    // ... обновление engine/heater/batt ...
 
-    document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
-    document.getElementById('tankTag').textContent=js.tank+' ml';
-    document.getElementById('fuelTag').textContent=js.cons+' ml';
-
-    updateUI();
+    const el = document.getElementById('phStatus');
+    if (js.preheat && js.preheat.enabled) {
+      if (js.preheat.running) {
+        el.textContent = 'Preheat: RUNNING, remain ' + js.preheat.remainSec + 's';
+      } else {
+        el.textContent = 'Preheat: scheduled, starts in ' + js.preheat.delaySec + 's';
+      }
+    } else {
+      el.textContent = 'Preheat: disabled';
+    }
   } catch(e) {
     console.error('Refresh error:', e);
   }
 }
+
 
 // ENGINE CONTROL (мгновенно)
 function setEngine(e){
@@ -716,6 +720,11 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <div style="height:16px"></div>
     <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
   </div>
+    <div style="height:16px"></div>
+    <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
+
+    <div id="phStatus" style="margin-top:8px;font-size:13px;color:#9aa3b2"></div>
+  </div>
 
   <div class="card">
     <div class="hdr">⚡ Energy Saving Mode</div>
@@ -838,6 +847,12 @@ async function saveHeaterSchedule() {
     alert('✗ Failed');
   }
 }
+const timerEnabledEl = document.getElementById('timerEnabled');
+timerEnabledEl.addEventListener('change', () => {
+  // Просто переиспользуем ту же функцию
+  saveHeaterSchedule();
+});
+
 
 async function saveSleepSettings() {
   const dayStartVal = document.getElementById('dayStart').value.split(',');
@@ -1060,7 +1075,10 @@ app.get('/api/state', (req, res) => {
 
 // Старый вариант: GET /api/update?...
 app.get('/api/update', (req, res) => {
-  const { engine, heater, level, batt, tank, cons, seq } = req.query;
+  const {
+    engine, heater, level, batt, tank, cons, seq,
+    ph_en, ph_run, ph_delay, ph_rem, ph_dur, ph_lvl, ph_auto
+  } = req.query;
 
   lastState.engine = engine || 'OFF';
   lastState.heater = parseInt(heater) || 0;
@@ -1069,11 +1087,27 @@ app.get('/api/update', (req, res) => {
   lastState.tank   = parseInt(tank)   || 0;
   lastState.cons   = parseInt(cons)   || 0;
   lastState.seq    = parseInt(seq)    || 0;
+
+  // Новое: состояние прехита от мастера
+  if (ph_en !== undefined) {
+    lastState.preheat = {
+      enabled:   ph_en   === '1',
+      running:   ph_run  === '1',
+      delaySec:  parseInt(ph_delay) || 0,
+      remainSec: parseInt(ph_rem)   || 0,
+      duration:  parseInt(ph_dur)   || 0,
+      level:     parseInt(ph_lvl)   || 0,
+      autoReady: ph_auto === '1'
+    };
+  }
+
   lastState.timestamp = Date.now();
 
-  console.log(`[${new Date().toISOString()}] ESP32 GET UPDATE: engine=${engine}, heater=${heater}, batt=${batt}mV`);
+  console.log(`[UPDATE] eng=${lastState.engine}, heater=${lastState.heater}, batt=${lastState.batt}mV, ph_en=${ph_en}, ph_delay=${ph_delay}`);
+
   res.send('OK');
 });
+
 
 // Новый вариант: POST /api/update с JSON
 app.post('/api/update', (req, res) => {
@@ -1194,11 +1228,25 @@ app.post('/api/heater_schedule', (req, res) => {
 
   console.log(`[${new Date().toISOString()}] Heater schedule updated:`, heaterSchedule);
 
-  if (!heaterSchedule.enabled) {
-    // Если выключили — просто убираем все PREHEAT из очереди
-    commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
-    return res.send('OK');
-  }
+if (!heaterSchedule.enabled) {
+  // Убираем все висящие PREHEAT из очереди
+  commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
+
+  // Отправляем мастеру команду на отмену локального таймера
+  const cancelCmd = 'PREHEAT=0,0,0,0;';
+  commandQueue.push(cancelCmd);
+
+  commandHistory.push({
+    command: cancelCmd,
+    status: 'QUEUED',
+    timestamp: new Date().toISOString()
+  });
+  if (commandHistory.length > 100) commandHistory.shift();
+
+  console.log('[SCHEDULE] PREHEAT canceled by user');
+
+  return res.send('OK');
+}
 
   // Считаем delay до ближайшего старта (сегодня/завтра)
   const now = new Date();

@@ -322,7 +322,7 @@ function checkHeaterSchedule() {
   }
 }
 
-setInterval(checkHeaterSchedule, 30000);
+// setInterval(checkHeaterSchedule, 30000);
 
 // ============================================
 // ГЛАВНАЯ СТРАНИЦА

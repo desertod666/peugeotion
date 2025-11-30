@@ -52,7 +52,6 @@
   GET  /api/ota/version/master
   GET  /api/ota/firmware/master
 
-
   ✅ WEB → СЕРВЕР
   ─────────────────────────────────────────
   GET  /api/queue_cmd?cmd=ENGINE=ACC;
@@ -280,6 +279,60 @@ let desiredState = {
   heater: 0,
   level: 1
 };
+
+// Локальное время машины (по IP мастера)
+let carTime = {
+  ip:          null,        // последний IP мастера
+  timezone:    'UTC',       // строка таймзоны, например "Europe/Oslo"
+  offsetSec:   0,           // смещение от UTC в секундах (например 3600)
+  lastLookup:  0            // когда последний раз обновляли (ms)
+};
+
+// Вспомогательная функция: обновить carTime по IP мастера
+function updateCarTimeFromIp(clientIp) {
+  if (!clientIp) return;
+
+  const now = Date.now();
+  // Обновляем не чаще, чем раз в 6 часов
+  if (carTime.ip === clientIp && (now - carTime.lastLookup) < 6 * 3600 * 1000) {
+    return;
+  }
+
+  carTime.ip = clientIp;
+  carTime.lastLookup = now;
+
+  // Пример с ipapi.co. Можно поменять на любой удобный GeoIP-сервис.
+  const url = `https://ipapi.co/${clientIp}/json/`;
+
+  https.get(url, (res) => {
+    let data = '';
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => {
+      try {
+        const js = JSON.parse(data);
+        if (js.timezone) {
+          carTime.timezone = js.timezone; // например "Europe/Oslo"
+        }
+        if (js.utc_offset) {
+          // ipapi.co даёт "+0100" или "+01:00" — нормализуем
+          let off = js.utc_offset;
+          if (typeof off === 'string') {
+            off = off.replace(':','');
+            const sign = off[0] === '-' ? -1 : 1;
+            const h = parseInt(off.substring(1,3)) || 0;
+            const m = parseInt(off.substring(3,5)) || 0;
+            carTime.offsetSec = sign * (h * 3600 + m * 60);
+          }
+        }
+        console.log('[GeoIP] carTime:', carTime);
+      } catch (e) {
+        console.log('[GeoIP] parse error:', e.message);
+      }
+    });
+  }).on('error', (e) => {
+    console.log('[GeoIP] request error:', e.message);
+  });
+}
 
 // ============================================
 // MIDDLEWARE
@@ -769,7 +822,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     <button class="btn success" onclick="sendRefill()">Refilled</button>
 
     <div style="height:12px"></div>
-
     <button class="btn danger" onclick="resetCalib()">Reset Calibration</button>
     <button class="btn" onclick="enableAuto()">Enable Auto Mode</button>
   </div>
@@ -1108,6 +1160,14 @@ app.get('/api/state', (req, res) => {
 
 // GET /api/update? ... + состояние прехита
 app.get('/api/update', (req, res) => {
+  // IP мастера (с учётом прокси Render)
+  const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+    .split(',')[0]
+    .replace('::ffff:', '')
+    .trim();
+
+  updateCarTimeFromIp(clientIp);
+
   const {
     engine, heater, level, batt, tank, cons, seq,
     ph_en, ph_run, ph_delay, ph_rem, ph_dur, ph_lvl, ph_auto
@@ -1189,6 +1249,18 @@ app.get('/api/time', (req, res) => {
   });
 });
 
+// Опционально: локальное время машины
+app.get('/api/car_time', (req, res) => {
+  const nowUtcMs = Date.now();
+  const offsetSec = carTime.offsetSec || 0;
+  const nowCarMs  = nowUtcMs + offsetSec * 1000;
+  res.json({
+    timezone: carTime.timezone,
+    offsetSec,
+    iso: new Date(nowCarMs).toISOString()
+  });
+});
+
 // Очередь команд → мастер
 app.get('/api/cmd', (req, res) => {
   if (commandQueue.length === 0) {
@@ -1258,19 +1330,24 @@ app.post('/api/heater_schedule', (req, res) => {
     return res.send('OK');
   }
 
-  // Включили: считаем delay до ближайшего старта
-  const now = new Date();
-  let target = new Date();
-  target.setHours(heaterSchedule.hour);
-  target.setMinutes(heaterSchedule.minute);
-  target.setSeconds(0);
-  target.setMilliseconds(0);
+  // Включили: считаем delay до ближайшего старта в ЛОКАЛЬНОМ времени машины
+  const nowUtcMs   = Date.now();
+  const offsetSec  = carTime.offsetSec || 0;       // смещение машины от UTC
+  const nowCarMs   = nowUtcMs + offsetSec * 1000;  // "часы" машины
+  const nowCar     = new Date(nowCarMs);
 
-  if (target.getTime() <= now.getTime()) {
-    target.setDate(target.getDate() + 1);
+  let targetCar = new Date(nowCarMs);
+  targetCar.setHours(heaterSchedule.hour);
+  targetCar.setMinutes(heaterSchedule.minute);
+  targetCar.setSeconds(0);
+  targetCar.setMilliseconds(0);
+
+  // Если целевое время уже прошло в локальном времени машины — берём следующий день
+  if (targetCar.getTime() <= nowCar.getTime()) {
+    targetCar.setDate(targetCar.getDate() + 1);
   }
 
-  const delaySec = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
+  const delaySec = Math.max(0, Math.floor((targetCar.getTime() - nowCar.getTime()) / 1000));
   const durSec   = heaterSchedule.preHeatTime || 180;
   const autoR    = heaterSchedule.autoReady ? 1 : 0;
   const lvl      = heaterSchedule.heaterLevel || 5;
@@ -1345,22 +1422,25 @@ function applyCommandToState(cmdLine) {
     const [key, val] = part.split('=').map(s => s.trim());
 
     if (key === 'ENGINE') {
-      desiredState.engine = val;  // ← было lastState.engine
+      desiredState.engine = val;
     } else if (key === 'HEATER') {
-      desiredState.heater = parseInt(val);  // ← было lastState.heater
+      desiredState.heater = parseInt(val);
       if (desiredState.heater === 0) desiredState.level = 0;
       else if (desiredState.level === 0) desiredState.level = 1;
     } else if (key === 'LEVEL') {
       const lvl = parseInt(val);
       if (lvl >= 1 && lvl <= 9) {
-        desiredState.level = lvl;  // ← было lastState.level
+        desiredState.level = lvl;
         if (desiredState.heater === 0) desiredState.heater = 1;
       }
     }
   });
-  // lastState.timestamp = Date.now();  // ← удалить эту строку, она не нужна для desired
 }
 
+app.post('/api/clear_history', (req, res) => {
+  commandHistory = [];
+  res.send('OK');
+});
 
 app.post('/api/clear_queue', (req, res) => {
   commandQueue = [];

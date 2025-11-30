@@ -274,6 +274,13 @@ let heaterSchedule = {
   autoReady:   true
 };
 
+// Желаемое состояние от пользователя (UI)
+let desiredState = {
+  engine: 'OFF',
+  heater: 0,
+  level: 1
+};
+
 // ============================================
 // MIDDLEWARE
 // ============================================
@@ -798,6 +805,16 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
     </div>
   </div>
 
+  <div class="card">
+    <div class="hdr">System Control</div>
+    <button class="btn danger" onclick="rebootMaster()">Reboot Master</button>
+    <div style="height:8px"></div>
+    <button class="btn danger" onclick="rebootSlave()">Reboot Slave</button>
+    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">
+      Commands are queued and executed when ESP32 polls /api/cmd.
+    </div>
+  </div>
+
   <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
 
   <div class="card">
@@ -901,6 +918,18 @@ async function enableAuto() {
   await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
   alert('✓ Auto queued');
   refresh();
+}
+
+async function rebootMaster() {
+  if (!confirm('Reboot MASTER ESP32 now?')) return;
+  await fetch('/api/queue_cmd?cmd=REBOOT_MASTER;');
+  alert('✓ Reboot master queued');
+}
+
+async function rebootSlave() {
+  if (!confirm('Reboot SLAVE ESP32 now?')) return;
+  await fetch('/api/queue_cmd?cmd=REBOOT_SLAVE;');
+  alert('✓ Reboot slave queued');
 }
 
 let lastLogCount = 0;
@@ -1309,7 +1338,6 @@ app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
 
-// Обновление lastState при ручных командах
 function applyCommandToState(cmdLine) {
   const parts = cmdLine.split(';');
   parts.forEach(part => {
@@ -1317,21 +1345,22 @@ function applyCommandToState(cmdLine) {
     const [key, val] = part.split('=').map(s => s.trim());
 
     if (key === 'ENGINE') {
-      lastState.engine = val;
+      desiredState.engine = val;  // ← было lastState.engine
     } else if (key === 'HEATER') {
-      lastState.heater = parseInt(val);
-      if (lastState.heater === 0) lastState.level = 0;
-      else if (lastState.level === 0) lastState.level = 1;
+      desiredState.heater = parseInt(val);  // ← было lastState.heater
+      if (desiredState.heater === 0) desiredState.level = 0;
+      else if (desiredState.level === 0) desiredState.level = 1;
     } else if (key === 'LEVEL') {
       const lvl = parseInt(val);
       if (lvl >= 1 && lvl <= 9) {
-        lastState.level = lvl;
-        if (lastState.heater === 0) lastState.heater = 1;
+        desiredState.level = lvl;  // ← было lastState.level
+        if (desiredState.heater === 0) desiredState.heater = 1;
       }
     }
   });
-  lastState.timestamp = Date.now();
+  // lastState.timestamp = Date.now();  // ← удалить эту строку, она не нужна для desired
 }
+
 
 app.post('/api/clear_queue', (req, res) => {
   commandQueue = [];
@@ -1430,6 +1459,17 @@ app.get('/api/ota/firmware/slave', (req, res) => {
     return res.status(404).send('File not found');
   }
   res.download(filePath);
+});
+
+// Endpoint для мастера: получить полный снапшот желаемого состояния
+app.get('/api/desired', (req, res) => {
+  res.json({
+    engine: desiredState.engine,
+    heater: desiredState.heater,
+    level:  desiredState.level,
+    heaterSchedule,
+    sleepSettings
+  });
 });
 
 // ============================================

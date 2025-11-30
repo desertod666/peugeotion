@@ -1211,19 +1211,46 @@ app.post('/api/sleep_settings', (req, res) => {
 });
 
 app.post('/api/heater_schedule', (req, res) => {
-  const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
-  
-  if (enabled !== undefined) heaterSchedule.enabled = enabled;
-  if (hour !== undefined) heaterSchedule.hour = parseInt(hour);
-  if (minute !== undefined) heaterSchedule.minute = parseInt(minute);
-  if (heaterLevel !== undefined) heaterSchedule.heaterLevel = parseInt(heaterLevel);
-  if (preHeatTime !== undefined) heaterSchedule.preHeatTime = parseInt(preHeatTime);
-  if (autoReady !== undefined) heaterSchedule.autoReady = autoReady;
-  
-  console.log(`[${new Date().toISOString()}] Heater schedule updated:`, heaterSchedule);
-  
-  res.send('OK');
+  // 1) Обновляем heaterSchedule из тела запроса как раньше
+  //    enabled, hour, minute, heaterLevel, preHeatTime, autoReady
+  //    (этот код у тебя уже есть)
+
+  // 2) Считаем, через сколько секунд нужно стартовать
+  const now = new Date();
+  let target = new Date();
+  target.setHours(heaterSchedule.hour);
+  target.setMinutes(heaterSchedule.minute);
+  target.setSeconds(0);
+  target.setMilliseconds(0);
+
+  if (target.getTime() <= now.getTime()) {
+    // если время уже прошло сегодня — переносим на завтра
+    target.setDate(target.getDate() + 1);
+  }
+
+  const delaySec = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
+  const durSec   = heaterSchedule.preHeatTime || 180; // длительность прогрева в секундах
+  const autoR    = heaterSchedule.autoReady ? 1 : 0;
+  const lvl      = heaterSchedule.heaterLevel || 5;
+
+  // 3) Убираем старые PREHEAT из очереди, чтобы не было конфликтов
+  commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
+
+  // 4) Кладём новую команду PREHEAT
+  const cmdLine = `PREHEAT=${delaySec},${durSec},${autoR},${lvl};`;
+  commandQueue.push(cmdLine);
+  commandHistory.unshift({
+    command: cmdLine,
+    status: 'QUEUED',
+    timestamp: new Date().toISOString()
+  });
+  if (commandHistory.length > 100) commandHistory.pop();
+
+  console.log('[SCHEDULE] PREHEAT queued:', cmdLine);
+
+  res.redirect('/config'); // или оставь как у тебя было (можно res.json('OK'))
 });
+
 
 app.get('/api/queue_cmd', (req, res) => {
   const { cmd } = req.query;

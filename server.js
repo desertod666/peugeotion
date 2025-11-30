@@ -42,9 +42,11 @@
 
   ✅ MASTER → СЕРВЕР
   ─────────────────────────────────────────
-  POST /api/update
+  GET  /api/update?engine=ACC&heater=1&level=5&batt=12800&tank=5000&cons=120&seq=42
+  POST /api/update  (JSON через WiFiClientSecure + HTTPClient)
+
   GET  /api/cmd
-  GET  /api/ack?cmd=...;&status=OK
+  GET  /api/ack?cmd=ENGINE=ACC;&status=OK
   GET  /api/time
   GET  /api/sleep_config
   GET  /api/ota/version/master
@@ -192,6 +194,11 @@ const upload = multer({ storage });
 // АВТОМАТИЧЕСКАЯ ЗАГРУЗКА ПРОШИВОК ИЗ ПАПКИ
 // ============================================
 
+let firmwareVersions = {
+  master: { version: '1.0.0', file: '', uploaded: null },
+  slave:  { version: '1.0.0', file: '', uploaded: null }
+};
+
 function loadFirmwareFromDirectory() {
   const firmwareDir = path.join(__dirname, 'firmware');
 
@@ -202,11 +209,13 @@ function loadFirmwareFromDirectory() {
   }
 
   const files = fs.readdirSync(firmwareDir);
+
   console.log(`[FIRMWARE] Scanning directory... Found ${files.length} files`);
 
   files.forEach(file => {
     if (file.endsWith('.bin')) {
       const match = file.match(/(master|slave)_v([\d.]+)\.bin/i);
+
       if (match) {
         const type    = match[1].toLowerCase();
         const version = match[2];
@@ -238,36 +247,31 @@ function loadFirmwareFromDirectory() {
 let lastState = {
   engine: 'OFF',
   heater: 0,
-  level: 1,
-  batt: 0,
-  tank: 0,
-  cons: 0,
-  seq: 0,
+  level:  1,
+  batt:   0,
+  tank:   0,
+  cons:   0,
+  seq:    0,
   timestamp: Date.now()
 };
 
 let commandQueue   = [];
 let commandHistory = [];
 
-let firmwareVersions = {
-  master: { version: '1.0.0', file: '', uploaded: null },
-  slave:  { version: '1.0.0', file: '', uploaded: null }
-};
-
 let sleepSettings = {
-  dayStart: 6,
-  dayEnd: 20,
-  dayInterval: 300,
+  dayStart:      6,
+  dayEnd:        20,
+  dayInterval:   300,
   nightInterval: 900
 };
 
 let heaterSchedule = {
-  enabled: false,
-  hour: 7,
-  minute: 0,
+  enabled:     false,
+  hour:        7,
+  minute:      0,
   heaterLevel: 5,
   preHeatTime: 180,
-  autoReady: true
+  autoReady:   true
 };
 
 // ============================================
@@ -278,19 +282,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
-// (СТАРЫЙ) ТАЙМЕР НА СЕРВЕРЕ — НЕ ИСПОЛЬЗУЕМ
-// ============================================
-//
-// triggerHeaterSchedule / checkHeaterSchedule / setInterval
-// оставлены как история, но логика теперь в PREHEAT на мастере.
-// Ничего здесь не вызываем, чтобы не было двойных команд.
-//
-// ============================================
-
-// (оставляем функции, если они уже есть, но не вызываем setInterval)
-
-// ============================================
-// ГЛАВНАЯ СТРАНИЦА (как в твоём файле, без изменений)
+// ГЛАВНАЯ СТРАНИЦА (как в 2.1.0)
 // ============================================
 
 app.get('/', (req, res) => {
@@ -364,99 +356,782 @@ const power=document.getElementById('power'), knob=document.getElementById('knob
 const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
 const doorSlider=document.getElementById('doorSlider'), doorKnob=document.getElementById('doorKnob');
 
-// ============================================
-// DEBOUNCING — только для отопителя!
-// ============================================
-
+// DEBOUNCE только для отопителя
 let heaterDebounceTimer = null;
-
 function debounceHeater(cmd) {
-  if (heaterDebounceTimer) {
-    clearTimeout(heaterDebounceTimer);
-  }
+  if (heaterDebounceTimer) clearTimeout(heaterDebounceTimer);
   heaterDebounceTimer = setTimeout(() => {
     fetch('/api/queue_cmd?cmd='+cmd);
     console.log('Sent to server:', cmd);
   }, 2000);
 }
 
-// ==== далее весь твой JS без изменений (управление UI, refresh, и т.п.) ====
+function colorizePower(){
+  power.classList.remove('off','acc','ign','ready');
+  const s=state.engine;
+  if(s==='OFF')power.classList.add('off');
+  if(s==='ACC')power.classList.add('acc');
+  if(s==='IGN')power.classList.add('ign');
+  if(s==='READY')power.classList.add('ready');
+}
+
+function nearestSlot(px,w){
+  const slots=[0,0.333,0.666,1.0];
+  const rel=Math.min(1,Math.max(0,px/(w-70)));
+  let k=0,d=9;
+  for(let i=0;i<4;i++){
+    const dd=Math.abs(rel-slots[i]);
+    if(dd<d){d=dd;k=i;}
+  }
+  return k;
+}
+
+function slotToLabel(i){return ['OFF','ACC','IGN','READY'][i];}
+function labelToSlot(s){return {'OFF':0,'ACC':1,'IGN':2,'READY':3}[s]??0;}
+
+function moveKnob(label){
+  const w=slider.clientWidth;
+  const slots=[0,0.333,0.666,1.0];
+  const x=slots[labelToSlot(label)]*(w-70);
+  knob.style.left=Math.round(x)+'px';
+  knob.textContent=label;
+}
+
+function drawHeatSegs(n){
+  heatSegs.innerHTML='';
+  for(let i=1;i<=9;i++){
+    const d=document.createElement('div');
+    d.style.flex='1';
+    d.style.height='10px';
+    d.style.borderRadius='6px';
+    d.style.background='#3b4257';
+    d.style.opacity='0.45';
+    if(i<=n){
+      d.style.opacity='1';
+      d.style.background=(i<=3?'#2ecc71':(i<=6?'#f0b429':'#e74c3c'));
+    }
+    heatSegs.appendChild(d);
+  }
+}
+
+function updateUI(){
+  document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
+  document.getElementById('engBadge').textContent=state.engine;
+
+  colorizePower();
+  moveKnob(state.engine);
+
+  heaterBtn.className='btn big '+(state.heater?'green':'gray');
+  heaterCtl.style.display=state.heater?'block':'none';
+  document.getElementById('heatLvlTag').textContent='Level: '+state.level+'/9';
+  drawHeatSegs(state.level);
+}
+
+// SERVER SYNC
+async function refresh() {
+  try {
+    const r=await fetch('/api/state');
+    const js=await r.json();
+
+    state.engine=js.engine;
+    state.heater=js.heater;
+    state.level=js.level;
+
+    document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
+    document.getElementById('tankTag').textContent=js.tank+' ml';
+    document.getElementById('fuelTag').textContent=js.cons+' ml';
+
+    updateUI();
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+// ENGINE CONTROL (мгновенно)
+function setEngine(e){
+  state.engine=e;
+  updateUI();
+  fetch('/api/queue_cmd?cmd=ENGINE='+e+';');
+}
+
+// HEATER CONTROL (с задержкой 2с)
+function setHeater(on){
+  if(on){
+    state.heater=1;
+    if(state.level===0) state.level=1;
+  } else {
+    state.heater=0;
+  }
+  updateUI();
+  const cmd = on ? 'HEATER=1;LEVEL='+state.level+';' : 'HEATER=0;';
+  debounceHeater(cmd);
+}
+
+function setHeaterLevel(lv){
+  if(lv<1) lv=1;
+  if(lv>9) lv=9;
+  state.level=lv;
+  if(state.heater===0) state.heater=1;
+  updateUI();
+  debounceHeater('LEVEL='+lv+';');
+}
+
+// DOOR CONTROL
+function doorCenter(){
+  const w=doorSlider.clientWidth;
+  const x=(w-64)/2;
+  doorKnob.style.left=Math.round(x)+'px';
+}
+function doorDo(act){
+  fetch('/api/queue_cmd?cmd=DOOR='+act+';');
+  setTimeout(doorCenter,300);
+}
+
+// POWER BUTTON (long press)
+power.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  beforeHold=state.engine;
+  pressT=Date.now();
+  clearTimeout(holdTimer);
+  tempIgn=false;
+  holdTimer=setTimeout(()=>{
+    tempIgn=true;
+    setEngine('IGN');
+  },1000);
+});
+
+power.addEventListener('pointerup',e=>{
+  e.preventDefault();
+  const dt=Date.now()-pressT;
+  clearTimeout(holdTimer);
+  if(dt<1000){
+    const next=(state.engine==='ACC')?'OFF':'ACC';
+    setEngine(next);
+  }else if(dt<3000){
+    if(tempIgn)setEngine(beforeHold);
+  }else{
+    setEngine('READY');
+  }
+});
+
+// ENGINE SLIDER
+let drag=false,startX=0,startLeft=0;
+slider.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  drag=true;
+  slider.setPointerCapture(e.pointerId);
+  startX=e.clientX;
+  startLeft=knob.offsetLeft;
+});
+slider.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  e.preventDefault();
+  const w=slider.clientWidth;
+  let x=startLeft+(e.clientX-startX);
+  x=Math.max(0,Math.min(w-70,x));
+  knob.style.left=x+'px';
+});
+slider.addEventListener('pointerup',e=>{
+  e.preventDefault();
+  if(!drag)return;
+  drag=false;
+  const w=slider.clientWidth;
+  const slot=nearestSlot(knob.offsetLeft,w);
+  const label=slotToLabel(slot);
+  setEngine(label);
+});
+
+// HEATER BUTTONS
+heaterBtn.addEventListener('click',e=>{
+  e.preventDefault();
+  setHeater(!state.heater);
+});
+document.getElementById('heatPlus').addEventListener('click',e=>{
+  e.preventDefault();
+  let n=Math.min(9,state.level+1);
+  setHeaterLevel(n);
+});
+document.getElementById('heatMinus').addEventListener('click',e=>{
+  e.preventDefault();
+  let n=Math.max(1,state.level-1);
+  setHeaterLevel(n);
+});
+
+// DOOR SLIDER
+let dDrag=false,dStartX=0,dStartLeft=0;
+doorCenter();
+doorSlider.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  dDrag=true;
+  doorSlider.setPointerCapture(e.pointerId);
+  dStartX=e.clientX;
+  dStartLeft=doorKnob.offsetLeft;
+});
+doorSlider.addEventListener('pointermove',e=>{
+  if(!dDrag)return;
+  e.preventDefault();
+  const w=doorSlider.clientWidth;
+  let x=dStartLeft+(e.clientX-dStartX);
+  x=Math.max(0,Math.min(w-64,x));
+  doorKnob.style.left=x+'px';
+});
+doorSlider.addEventListener('pointerup',e=>{
+  e.preventDefault();
+  if(!dDrag)return;
+  dDrag=false;
+  const w=doorSlider.clientWidth;
+  const center=(w-64)/2;
+  const x=doorKnob.offsetLeft;
+  const thr=w*0.15;
+  if (x < center - thr) doorDo('LOCK');
+  else if (x > center + thr) doorDo('UNLOCK');
+  else doorCenter();
+});
+
+// INIT
+updateUI();
+refresh();
+setInterval(refresh,5000);
 </script>
 </body></html>
   `);
 });
 
 // ============================================
-// /config страница – оставлена как в твоём файле
+// СТРАНИЦА НАСТРОЕК (полная, как в 2.1.0, но с логом снизу)
 // ============================================
 
 app.get('/config', (req, res) => {
-  // ... ВЕСЬ ТВОЙ HTML/JS ИЗ server.txt ДЛЯ /config БЕЗ ИЗМЕНЕНИЙ ...
-  // (я не разворачиваю его целиком второй раз, чтобы не раздувать ответ)
-  // Важно: JS уже обращается к /api/heater_schedule, /api/sleep_settings, /api/history и т.д.
-  // Этот HTML можешь взять из своего текущего server.txt 1:1.
-  // Ниже – только API-часть, которую мы правим.
+  const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
+  const isOnline = stateAge < 120;
+
+  let timeOptions = '';
+  for(let h = 0; h <= 23; h++) {
+    for(let m = 0; m < 60; m += 30) {
+      const timeStr = `${h}:${String(m).padStart(2, '0')}`;
+      timeOptions += `<option value="${h},${m}">${timeStr}</option>`;
+    }
+  }
+
+  let minuteOptions = '';
+  for(let i=0; i<=59; i++) {
+    minuteOptions += `<option value="${i}">${String(i).padStart(2,'0')}</option>`;
+  }
+
+  let levelOptions = '';
+  for(let i=1; i<=9; i++) {
+    levelOptions += `<option value="${i}">${i}</option>`;
+  }
+
+  let intervalOptions = '';
+  const intervals = [1, 5, 10, 30, 60, 120, 180, 300, 600, 900, 1800, 3600];
+  intervals.forEach(sec => {
+    const label = sec < 60 ? `${sec}s` : `${Math.floor(sec/60)}min`;
+    intervalOptions += `<option value="${sec}">${label}</option>`;
+  });
+
+  res.send(`
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configuration</title>
+<style>
+:root{--bg:#0f1420;--panel:#1c2333;--txt:#e6e8ef;--muted:#9aa3b2;--accent:#d94f4f;--ok:#32d583;--info:#3b82f6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font-family:Inter,system-ui,Arial}.wrap{max-width:500px;margin:0 auto;padding:16px}
+.card{background:#1c2333;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.35);margin:14px 0}.hdr{font-weight:800;font-size:18px;margin-bottom:12px}
+.btn{padding:12px 16px;border-radius:10px;background:#39425e;border:none;color:#e9edf4;cursor:pointer;font-size:14px;font-weight:600;width:100%}
+.btn.primary{background:#3b82f6}.btn.danger{background:#d84d4d}.btn.success{background:#24a06b}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.input,.select{width:100%;padding:10px;border-radius:8px;background:#2a3246;border:1px solid #3b4254;color:#e6e8ef;font-size:16px;margin:8px 0;box-sizing:border-box}
+.select{appearance:none;background-image:url("image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath fill='%23e6e8ef' d='M0 0l6 8 6-8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:36px}
+.online{color:#32d583}.offline{color:#d84d4f}
+label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
+.log-window{background:#0a0e14;border:1px solid #2a3246;border-radius:8px;padding:12px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.6}
+.log-window::-webkit-scrollbar{width:8px}
+.log-window::-webkit-scrollbar-track{background:#1c2333;border-radius:4px}
+.log-window::-webkit-scrollbar-thumb{background:#39425e;border-radius:4px}
+.log-window::-webkit-scrollbar-thumb:hover{background:#4a5568}
+.log-entry{margin:4px 0;display:flex;gap:10px;align-items:center}
+.log-time{color:#6b7280;font-size:11px;min-width:80px}
+.log-cmd{color:#9aa3b2;flex:1}
+.log-status{font-weight:700;min-width:60px;text-align:right}
+.log-status.ok{color:#32d583}
+.log-status.error{color:#d84d4f}
+.log-status.scheduled{color:#3b82f6}
+.log-status.queued{color:#f0b429}
+.time-row{display:flex;gap:12px;align-items:center}
+.time-select{flex:1}
+.toggle{position:relative;display:inline-block;width:50px;height:24px}
+.toggle input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#39425e;border-radius:24px;transition:0.3s}
+.toggle-slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:0.3s}
+.toggle input:checked + .toggle-slider{background:#32d583}
+.toggle input:checked + .toggle-slider:before{transform:translateX(26px)}
+</style></head><body>
+<div class="wrap">
+  <div class="card">
+    <div class="hdr">Server Status</div>
+    <div style="margin:12px 0">
+      <div><strong>Platform:</strong> Render.com</div>
+      <div style="margin-top:8px"><strong>ESP32:</strong> <span class="${isOnline?'online':'offline'}">${isOnline?'Online':'Offline'}</span> (${stateAge}s ago)</div>
+      <div style="margin-top:8px"><strong>Server Time:</strong> <span id="serverTime">--:--:--</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="hdr">🔥 Heater Auto-Start Timer</div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <strong>Enable Timer</strong>
+      <label class="toggle">
+        <input type="checkbox" id="timerEnabled" ${heaterSchedule.enabled?'checked':''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <label>Start Time</label>
+    <div class="time-row">
+      <select id="timerHour" class="select" style="width:80px">
+        ${Array.from({length:24}, (_, i) => `<option value="${i}">${i}</option>`).join('')}
+      </select>
+      <div style="padding-top:8px">:</div>
+      <select id="timerMinute" class="select" style="width:80px">
+        ${minuteOptions}
+      </select>
+    </div>
+
+    <label style="margin-top:16px">Heater Power Level</label>
+    <select id="timerLevel" class="select">${levelOptions}</select>
+
+    <label style="margin-top:16px">Pre-heat Time</label>
+    <select id="preHeatTime" class="select">${intervalOptions}</select>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+      <strong>Auto Engine READY</strong>
+      <label class="toggle">
+        <input type="checkbox" id="autoReady" ${heaterSchedule.autoReady?'checked':''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <div style="height:16px"></div>
+    <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
+  </div>
+
+  <div class="card">
+    <div class="hdr">⚡ Energy Saving Mode</div>
+
+    <label>Active Period (Day Mode)</label>
+    <div class="time-row">
+      <select id="dayStart" class="select time-select">${timeOptions}</select>
+      <div style="padding-top:8px">to</div>
+      <select id="dayEnd" class="select time-select">${timeOptions}</select>
+    </div>
+
+    <label style="margin-top:16px">Wake Interval (Day)</label>
+    <select id="dayInterval" class="select">${intervalOptions}</select>
+
+    <label style="margin-top:16px">Wake Interval (Night)</label>
+    <select id="nightInterval" class="select">${intervalOptions}</select>
+
+    <div style="height:16px"></div>
+    <button class="btn primary" onclick="saveSleepSettings()">Save Energy Settings</button>
+  </div>
+
+  <div class="card">
+    <div class="hdr">Slave Device Data</div>
+    <div style="margin:12px 0">
+      <div><strong>Tank:</strong> <span id="slaveTank">${lastState.tank}</span> ml</div>
+      <div style="margin-top:8px"><strong>Consumed:</strong> <span id="slaveConsumed">${lastState.cons}</span> ml</div>
+      <div style="margin-top:8px"><strong>Battery:</strong> <span id="batt">${(lastState.batt/1000).toFixed(2)}V</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="hdr">Fuel Calibration</div>
+
+    <label>Set ml per tick</label>
+    <input type="number" id="mlPerTick" class="input" placeholder="e.g. 0.03" step="0.00001" value="0.03">
+    <button class="btn" onclick="setMlPerTick()">Set ml/tick</button>
+
+    <div style="height:12px"></div>
+
+    <label>Tank Refilled (ml)</label>
+    <input type="number" id="refilledMl" class="input" placeholder="How many ml?" step="1">
+    <button class="btn success" onclick="sendRefill()">Refilled</button>
+
+    <div style="height:12px"></div>
+
+    <button class="btn danger" onclick="resetCalib()">Reset Calibration</button>
+    <button class="btn" onclick="enableAuto()">Enable Auto Mode</button>
+  </div>
+
+  <div class="card">
+    <div class="hdr">OTA Firmware Updates</div>
+    <div style="margin:12px 0">
+      <div><strong>Master:</strong> v${firmwareVersions.master.version} ${firmwareVersions.master.file ? '('+firmwareVersions.master.file+')' : ''}</div>
+      <div style="margin-top:8px"><strong>Slave:</strong> v${firmwareVersions.slave.version} ${firmwareVersions.slave.file ? '('+firmwareVersions.slave.file+')' : ''}</div>
+    </div>
+
+    <label>Upload Master Firmware (.bin)</label>
+    <form id="masterForm" enctype="multipart/form-data">
+      <input type="file" id="masterFile" accept=".bin" class="input" required>
+      <input type="text" id="masterVer" class="input" placeholder="Version (e.g. 1.0.1)" required>
+      <button type="submit" class="btn primary">Upload Master</button>
+    </form>
+
+    <label style="margin-top:16px">Upload Slave Firmware (.bin)</label>
+    <form id="slaveForm" enctype="multipart/form-data">
+      <input type="file" id="slaveFile" accept=".bin" class="input" required>
+      <input type="text" id="slaveVer" class="input" placeholder="Version (e.g. 1.0.1)" required>
+      <button type="submit" class="btn primary">Upload Slave</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="hdr">ESP32 Vehicle Data</div>
+    <div style="margin:12px 0">
+      <div><strong>Engine:</strong> <span id="engine">${lastState.engine}</span></div>
+      <div style="margin-top:8px"><strong>Heater:</strong> <span id="heater">${lastState.heater?'ON ('+lastState.level+')':'OFF'}</span></div>
+      <div style="margin-top:8px"><strong>Sequence:</strong> #${lastState.seq}</div>
+    </div>
+  </div>
+
+  <button class="btn" onclick="location.href='/'">Back to Dashboard</button>
+
+  <div class="card">
+    <div class="hdr">Command Log</div>
+    <div id="logWindow" class="log-window">
+      <div style="color:#6b7280;text-align:center">Waiting...</div>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:#9aa3b2">All commands: engine, heater, doors, calibration, timers</div>
+  </div>
+</div>
+
+<script>
+document.getElementById('timerHour').value   = ${heaterSchedule.hour};
+document.getElementById('timerMinute').value = ${heaterSchedule.minute};
+document.getElementById('timerLevel').value  = ${heaterSchedule.heaterLevel};
+document.getElementById('preHeatTime').value = ${heaterSchedule.preHeatTime};
+document.getElementById('dayStart').value    = '${sleepSettings.dayStart},0';
+document.getElementById('dayEnd').value      = '${sleepSettings.dayEnd},0';
+document.getElementById('dayInterval').value = ${sleepSettings.dayInterval};
+document.getElementById('nightInterval').value = ${sleepSettings.nightInterval};
+
+async function saveHeaterSchedule() {
+  const enabled   = document.getElementById('timerEnabled').checked;
+  const hour      = parseInt(document.getElementById('timerHour').value);
+  const minute    = parseInt(document.getElementById('timerMinute').value);
+  const level     = parseInt(document.getElementById('timerLevel').value);
+  const preHeat   = parseInt(document.getElementById('preHeatTime').value);
+  const autoReady = document.getElementById('autoReady').checked;
+
+  const res = await fetch('/api/heater_schedule', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled, hour, minute, heaterLevel: level, preHeatTime: preHeat, autoReady})
+  });
+
+  if(res.ok) {
+    alert('✓ Timer saved!');
+    location.reload();
+  } else {
+    alert('✗ Failed');
+  }
+}
+
+async function saveSleepSettings() {
+  const dayStartVal = document.getElementById('dayStart').value.split(',');
+  const dayEndVal   = document.getElementById('dayEnd').value.split(',');
+  const dayStart    = parseInt(dayStartVal[0]);
+  const dayEnd      = parseInt(dayEndVal[0]);
+  const dayInterval   = parseInt(document.getElementById('dayInterval').value);
+  const nightInterval = parseInt(document.getElementById('nightInterval').value);
+
+  if(dayStart >= dayEnd) {
+    alert('Start must be before end');
+    return;
+  }
+
+  const res = await fetch('/api/sleep_settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dayStart, dayEnd, dayInterval, nightInterval})
+  });
+
+  if(res.ok) {
+    alert('✓ Saved!');
+  } else {
+    alert('✗ Failed');
+  }
+}
+
+async function setMlPerTick() {
+  const val = document.getElementById('mlPerTick').value;
+  if(!val || val <= 0) { alert('Enter valid ml/tick'); return; }
+  await fetch('/api/queue_cmd?cmd=MLPT='+val+';');
+  alert('✓ Queued');
+  refresh();
+}
+
+async function sendRefill() {
+  const val = document.getElementById('refilledMl').value;
+  if(!val || val <= 0) { alert('Enter amount'); return; }
+  await fetch('/api/queue_cmd?cmd=REFILLED='+val+';');
+  alert('✓ Refilled: ' + val + ' ml');
+  document.getElementById('refilledMl').value = '';
+  refresh();
+}
+
+async function resetCalib() {
+  if(!confirm('Reset?')) return;
+  await fetch('/api/queue_cmd?cmd=RESET_CALIB=1;');
+  alert('✓ Reset queued');
+  refresh();
+}
+
+async function enableAuto() {
+  if(!confirm('Enable auto?')) return;
+  await fetch('/api/queue_cmd?cmd=ENABLE_AUTO=1;');
+  alert('✓ Auto queued');
+  refresh();
+}
+
+let lastLogCount = 0;
+
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/history');
+    const history = await r.json();
+
+    const logWindow = document.getElementById('logWindow');
+
+    if (history.length === 0) {
+      logWindow.innerHTML = '<div style="color:#6b7280;text-align:center">Waiting...</div>';
+      return;
+    }
+
+    const shouldScroll = history.length > lastLogCount;
+    lastLogCount = history.length;
+
+    const slice = history.slice(-50); // последние 50 в исходном порядке
+
+    let html = '';
+    slice.forEach(item => {
+      const time = new Date(item.timestamp).toLocaleString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+
+      let statusClass = 'ok';
+      let statusIcon  = '✓';
+      if(item.status === 'ERROR') {
+        statusClass = 'error';
+        statusIcon  = '✗';
+      } else if(item.status === 'SCHEDULED') {
+        statusClass = 'scheduled';
+        statusIcon  = '⏰';
+      } else if(item.status === 'QUEUED') {
+        statusClass = 'queued';
+        statusIcon  = '⏳';
+      }
+
+      html += '<div class="log-entry">';
+      html += '<span class="log-time">' + time + '</span>';
+      html += '<span class="log-cmd">' + item.command + '</span>';
+      html += '<span class="log-status ' + statusClass + '">' + statusIcon + ' ' + item.status + '</span>';
+      html += '</div>';
+    });
+
+    logWindow.innerHTML = html;
+
+    if (shouldScroll) {
+      logWindow.scrollTop = logWindow.scrollHeight;
+    }
+  } catch(e) {
+    console.error('Log error:', e);
+  }
+}
+
+document.getElementById('masterForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('masterFile').files[0];
+  const ver  = document.getElementById('masterVer').value.trim();
+  if(!file || !ver) { alert('Select file and version'); return; }
+
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
+
+  const formData = new FormData();
+  formData.append('firmware', file);
+  formData.append('version',  ver);
+
+  try {
+    const res = await fetch('/api/ota/upload/master', { method: 'POST', body: formData });
+    if(res.ok) {
+      alert('✓ Uploaded! (synced to GitHub)');
+      location.reload();
+    } else {
+      alert('✗ Failed');
+      btn.disabled = false;
+      btn.textContent = 'Upload Master';
+    }
+  } catch(err) {
+    alert('✗ Error');
+    btn.disabled = false;
+    btn.textContent = 'Upload Master';
+  }
+});
+
+document.getElementById('slaveForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('slaveFile').files[0];
+  const ver  = document.getElementById('slaveVer').value.trim();
+  if(!file || !ver) { alert('Select file and version'); return; }
+
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
+
+  const formData = new FormData();
+  formData.append('firmware', file);
+  formData.append('version',  ver);
+
+  try {
+    const res = await fetch('/api/ota/upload/slave', { method: 'POST', body: formData });
+    if(res.ok) {
+      alert('✓ Uploaded! (synced to GitHub)');
+      location.reload();
+    } else {
+      alert('✗ Failed');
+      btn.disabled = false;
+      btn.textContent = 'Upload Slave';
+    }
+  } catch(err) {
+    alert('✗ Error');
+    btn.disabled = false;
+    btn.textContent = 'Upload Slave';
+  }
+});
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/state');
+    const js = await r.json();
+
+    document.getElementById('engine').textContent = js.engine;
+    document.getElementById('heater').textContent = js.heater ? 'ON ('+js.level+')' : 'OFF';
+    document.getElementById('batt').textContent   = (js.batt/1000).toFixed(2) + 'V';
+    document.getElementById('slaveTank').textContent    = js.tank;
+    document.getElementById('slaveConsumed').textContent = js.cons;
+  } catch(e) {
+    console.error('Refresh error:', e);
+  }
+}
+
+function updateServerTime() {
+  const now = new Date();
+  document.getElementById('serverTime').textContent = now.toLocaleString('ru-RU', {
+    hour:   '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+loadLogs();
+refresh();
+updateServerTime();
+setInterval(loadLogs, 2000);
+setInterval(refresh,  5000);
+setInterval(updateServerTime, 1000);
+</script>
+</body></html>
+  `);
 });
 
 // ============================================
 // API ENDPOINTS
 // ============================================
 
-// Текущее состояние для UI
 app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
 
-// Новый POST /api/update — двусторонний обмен мастера и сервера
-app.post('/api/update', (req, res) => {
-  const {
-    engine, heater, level, batt_master,
-    tank, cons, seq,
-    slave_heater_state, slave_water_on, slave_top, slave_bot,
-    slave_batt, slave_mlpt, slave_ticks, slave_calib, slave_auto_mode
-  } = req.body;
-
-  if (engine !== undefined) lastState.engine = engine;
-  if (heater !== undefined) lastState.heater = parseInt(heater);
-  if (level !== undefined)  lastState.level  = parseInt(level);
-
-  if (batt_master !== undefined) {
-    lastState.batt = parseInt(batt_master);
-  } else if (slave_batt !== undefined) {
-    lastState.batt = parseInt(slave_batt);
-  }
-
-  if (tank !== undefined) lastState.tank = parseInt(tank);
-  if (cons !== undefined) lastState.cons = parseInt(cons);
-  if (seq  !== undefined) lastState.seq  = parseInt(seq);
-
-  lastState.timestamp = Date.now();
-
-  console.log(`[UPDATE] engine=${lastState.engine}, heater=${lastState.heater}, level=${lastState.level}, batt=${lastState.batt}mV, tank=${lastState.tank}ml, cons=${lastState.cons}ml`);
-
-  res.json({
-    status: 'OK',
-    server_state: lastState
-  });
-});
-
-// Старый GET /api/update — для совместимости (если где-то ещё используется)
+// Старый вариант: GET /api/update?...
 app.get('/api/update', (req, res) => {
   const { engine, heater, level, batt, tank, cons, seq } = req.query;
 
-  lastState = {
-    engine: engine || 'OFF',
-    heater: parseInt(heater) || 0,
-    level:  parseInt(level)  || 1,
-    batt:   parseInt(batt)   || 0,
-    tank:   parseInt(tank)   || 0,
-    cons:   parseInt(cons)   || 0,
-    seq:    parseInt(seq)    || 0,
-    timestamp: Date.now()
-  };
+  lastState.engine = engine || 'OFF';
+  lastState.heater = parseInt(heater) || 0;
+  lastState.level  = parseInt(level)  || 1;
+  lastState.batt   = parseInt(batt)   || 0;
+  lastState.tank   = parseInt(tank)   || 0;
+  lastState.cons   = parseInt(cons)   || 0;
+  lastState.seq    = parseInt(seq)    || 0;
+  lastState.timestamp = Date.now();
 
-  console.log(`[LEGACY UPDATE] engine=${engine}, heater=${heater}, batt=${batt}mV`);
+  console.log(`[${new Date().toISOString()}] ESP32 GET UPDATE: engine=${engine}, heater=${heater}, batt=${batt}mV`);
   res.send('OK');
+});
+
+// Новый вариант: POST /api/update с JSON
+app.post('/api/update', (req, res) => {
+  const {
+    engine,
+    heater,
+    level,
+    batt_master,
+    tank,
+    cons,
+    seq,
+
+    // поля от слейва, если мастер их проксирует
+    slave_batt,
+    slave_tank,
+    slave_cons,
+    slave_seq
+  } = req.body;
+
+  if (engine !== undefined) {
+    lastState.engine = engine;
+  }
+  if (heater !== undefined) {
+    lastState.heater = parseInt(heater) || 0;
+  }
+  if (level !== undefined) {
+    lastState.level = parseInt(level) || 0;
+  }
+
+  if (batt_master !== undefined) {
+    lastState.batt = parseInt(batt_master) || 0;
+  } else if (slave_batt !== undefined) {
+    lastState.batt = parseInt(slave_batt) || 0;
+  }
+
+  if (tank !== undefined) {
+    lastState.tank = parseInt(tank) || 0;
+  } else if (slave_tank !== undefined) {
+    lastState.tank = parseInt(slave_tank) || 0;
+  }
+
+  if (cons !== undefined) {
+    lastState.cons = parseInt(cons) || 0;
+  } else if (slave_cons !== undefined) {
+    lastState.cons = parseInt(slave_cons) || 0;
+  }
+
+  if (seq !== undefined) {
+    lastState.seq = parseInt(seq) || 0;
+  } else if (slave_seq !== undefined) {
+    lastState.seq = parseInt(slave_seq) || 0;
+  }
+
+  lastState.timestamp = Date.now();
+
+  console.log(`[${new Date().toISOString()}] ESP32 POST UPDATE: engine=${lastState.engine}, heater=${lastState.heater}, batt=${lastState.batt}mV`);
+
+  res.json({ status: 'OK', server_state: lastState });
 });
 
 app.get('/api/time', (req, res) => {
@@ -580,7 +1255,7 @@ app.get('/api/queue_cmd', (req, res) => {
   res.send('OK');
 });
 
-// ACK от мастера — больше не создаём NONE, новые записи в конец
+// ACK от мастера — без NONE
 app.get('/api/ack', (req, res) => {
   const { cmd, status } = req.query;
   if (!cmd || cmd === 'NONE') {
@@ -633,7 +1308,6 @@ function applyCommandToState(cmdLine) {
 
 // Очистка очереди (если надо из UI)
 app.post('/api/clear_queue', (req, res) => {
-  const cleared = commandQueue.length;
   commandQueue = [];
   res.send('OK');
 });

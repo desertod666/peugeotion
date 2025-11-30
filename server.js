@@ -474,9 +474,15 @@ function drawHeatSegs(n){
 }
 
 function updateUI(){
-  document.getElementById('heaterBadge').textContent=state.heater?('ON ('+state.level+')'):'OFF';
-  document.getElementById('engBadge').textContent=state.engine;
+  const realEngine = state.realEngine || state.engine;
+  const realHeater = (state.realHeater !== undefined) ? state.realHeater : state.heater;
+  const realLevel  = state.realLevel  || state.level;
 
+  // бейджи — по фактическому состоянию
+  document.getElementById('engBadge').textContent    = realEngine;
+  document.getElementById('heaterBadge').textContent = realHeater ? ('ON ('+realLevel+')') : 'OFF';
+
+  // цвет power и слайдер — по желаемому состоянию
   colorizePower();
   moveKnob(state.engine);
 
@@ -492,9 +498,20 @@ async function refresh() {
     const r=await fetch('/api/state');
     const js=await r.json();
 
-    state.engine=js.engine;
-    state.heater=js.heater;
-    state.level=js.level;
+    // фактическое состояние (для бейджей)
+    const realEngine = js.engine;
+    const realHeater = js.heater;
+    const realLevel  = js.level;
+
+    // желаемое состояние (для слайдера/кнопок)
+    state.engine = js.desiredEngine || realEngine;
+    state.heater = (js.desiredHeater !== undefined) ? js.desiredHeater : realHeater;
+    state.level  = js.desiredLevel  || realLevel;
+
+    // сохраним реальные значения для бейджей
+    state.realEngine = realEngine;
+    state.realHeater = realHeater;
+    state.realLevel  = realLevel;
 
     document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
     document.getElementById('tankTag').textContent=js.tank+' ml';
@@ -1154,7 +1171,12 @@ setInterval(updateServerTime, 1000);
 // ============================================
 
 app.get('/api/state', (req, res) => {
-  res.json(lastState);
+  res.json({
+    ...lastState,
+    desiredEngine: desiredState.engine,
+    desiredHeater: desiredState.heater,
+    desiredLevel:  desiredState.level
+  });
 });
 
 // GET /api/update? ... + состояние прехита

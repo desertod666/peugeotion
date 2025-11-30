@@ -1,6 +1,6 @@
 // ============================================
 // Render Server — Peugeotion ESP32 Car Control
-// Version: 2.2.0 — UART/Preheat/ACK edition
+// Version: 2.2.1 — UART/Preheat/ACK/ECO-desiredHeater
 // ============================================
 
 /*
@@ -282,10 +282,10 @@ let desiredState = {
 
 // Локальное время машины (по IP мастера)
 let carTime = {
-  ip:          null,        // последний IP мастера
-  timezone:    'UTC',       // строка таймзоны, например "Europe/Oslo"
-  offsetSec:   0,           // смещение от UTC в секундах (например 3600)
-  lastLookup:  0            // когда последний раз обновляли (ms)
+  ip:          null,
+  timezone:    'UTC',
+  offsetSec:   0,
+  lastLookup:  0
 };
 
 // Обновление часового пояса по IP мастера
@@ -302,7 +302,6 @@ function updateCarTimeFromIp(clientIp) {
   carTime.lastLookup = now;
 
   const url = `https://ipapi.co/${clientIp}/json/`;
-
   https.get(url, (res) => {
     let data = '';
     res.on('data', chunk => data += chunk);
@@ -313,7 +312,6 @@ function updateCarTimeFromIp(clientIp) {
           carTime.timezone = js.timezone;
         }
         if (js.utc_offset) {
-          // "+0100" или "+01:00"
           let off = js.utc_offset;
           if (typeof off === 'string') {
             off = off.replace(':','');
@@ -474,15 +472,16 @@ function drawHeatSegs(n){
 }
 
 function updateUI(){
-  const realEngine = state.realEngine || state.engine;
-  const realHeater = (state.realHeater !== undefined) ? state.realHeater : state.heater;
-  const realLevel  = state.realLevel  || state.level;
+  // Бейджи показывают фактическое состояние
+  const engBadgeVal    = state.realEngine || state.engine;
+  const heaterBadgeVal = (state.realHeater !== undefined) ? state.realHeater : state.heater;
+  const heaterLevelVal = state.realLevel  || state.level;
 
-  // бейджи — по фактическому состоянию
-  document.getElementById('engBadge').textContent    = realEngine;
-  document.getElementById('heaterBadge').textContent = realHeater ? ('ON ('+realLevel+')') : 'OFF';
+  document.getElementById('heaterBadge').textContent =
+    heaterBadgeVal ? ('ON ('+heaterLevelVal+')') : 'OFF';
+  document.getElementById('engBadge').textContent = engBadgeVal;
 
-  // цвет power и слайдер — по желаемому состоянию
+  // UI‑контролы ориентируются на желаемое состояние
   colorizePower();
   moveKnob(state.engine);
 
@@ -492,30 +491,31 @@ function updateUI(){
   drawHeatSegs(state.level);
 }
 
-// SERVER SYNC — живое обновление каждые 5с
+// SERVER SYNC — живое обновление каждые 1с
 async function refresh() {
   try {
     const r=await fetch('/api/state');
     const js=await r.json();
 
-    // фактическое состояние (для бейджей)
+    // фактическое состояние для бейджей
     const realEngine = js.engine;
     const realHeater = js.heater;
     const realLevel  = js.level;
 
-    // желаемое состояние (для слайдера/кнопок)
+    // желаемое состояние (если есть) для управления
     state.engine = js.desiredEngine || realEngine;
     state.heater = (js.desiredHeater !== undefined) ? js.desiredHeater : realHeater;
     state.level  = js.desiredLevel  || realLevel;
 
-    // сохраним реальные значения для бейджей
-    state.realEngine = realEngine;
-    state.realHeater = realHeater;
-    state.realLevel  = realLevel;
-
+    // используем real* для сенсоров/бейджей
     document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
     document.getElementById('tankTag').textContent=js.tank+' ml';
     document.getElementById('fuelTag').textContent=js.cons+' ml';
+
+    // сохраним фактические значения в глобальном объекте для бейджей
+    state.realEngine = realEngine;
+    state.realHeater = realHeater;
+    state.realLevel  = realLevel;
 
     updateUI();
   } catch(e) {
@@ -826,7 +826,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
 
   <div class="card">
     <div class="hdr">Fuel Calibration</div>
-
     <label>Set ml per tick</label>
     <input type="number" id="mlPerTick" class="input" placeholder="e.g. 0.03" step="0.00001" value="0.03">
     <button class="btn" onclick="setMlPerTick()">Set ml/tick</button>
@@ -1580,7 +1579,7 @@ app.listen(port, () => {
   loadFirmwareFromDirectory();
 
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`🚗 Peugeotion Server v2.2.0 Started`);
+  console.log(`🚗 Peugeotion Server v2.2.1 Started`);
   console.log(`${'='.repeat(60)}`);
   console.log(`📍 Port: ${port}`);
   console.log(`🌐 URL: https://peugeotion.onrender.com`);

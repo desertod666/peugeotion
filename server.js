@@ -282,7 +282,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
-// ГЛАВНАЯ СТРАНИЦА (как в 2.1.0)
+// ГЛАВНАЯ СТРАНИЦА
 // ============================================
 
 app.get('/', (req, res) => {
@@ -427,29 +427,25 @@ function updateUI(){
   drawHeatSegs(state.level);
 }
 
-// SERVER SYNC
+// SERVER SYNC — живое обновление каждые 5с
 async function refresh() {
   try {
-    const r = await fetch('/api/state');
-    const js = await r.json();
+    const r=await fetch('/api/state');
+    const js=await r.json();
 
-    // ... обновление engine/heater/batt ...
+    state.engine=js.engine;
+    state.heater=js.heater;
+    state.level=js.level;
 
-    const el = document.getElementById('phStatus');
-    if (js.preheat && js.preheat.enabled) {
-      if (js.preheat.running) {
-        el.textContent = 'Preheat: RUNNING, remain ' + js.preheat.remainSec + 's';
-      } else {
-        el.textContent = 'Preheat: scheduled, starts in ' + js.preheat.delaySec + 's';
-      }
-    } else {
-      el.textContent = 'Preheat: disabled';
-    }
+    document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
+    document.getElementById('tankTag').textContent=js.tank+' ml';
+    document.getElementById('fuelTag').textContent=js.cons+' ml';
+
+    updateUI();
   } catch(e) {
     console.error('Refresh error:', e);
   }
 }
-
 
 // ENGINE CONTROL (мгновенно)
 function setEngine(e){
@@ -602,7 +598,7 @@ setInterval(refresh,5000);
 });
 
 // ============================================
-// СТРАНИЦА НАСТРОЕК (полная, как в 2.1.0, но с логом снизу)
+// СТРАНИЦА НАСТРОЕК
 // ============================================
 
 app.get('/config', (req, res) => {
@@ -717,9 +713,6 @@ label{display:block;margin:12px 0 6px;font-weight:600;font-size:13px}
       </label>
     </div>
 
-    <div style="height:16px"></div>
-    <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
-  </div>
     <div style="height:16px"></div>
     <button class="btn primary" onclick="saveHeaterSchedule()">Save Timer Settings</button>
 
@@ -842,17 +835,16 @@ async function saveHeaterSchedule() {
 
   if(res.ok) {
     alert('✓ Timer saved!');
-    location.reload();
   } else {
     alert('✗ Failed');
   }
 }
+
+// Галочка сразу шлёт включить/выключить
 const timerEnabledEl = document.getElementById('timerEnabled');
 timerEnabledEl.addEventListener('change', () => {
-  // Просто переиспользуем ту же функцию
   saveHeaterSchedule();
 });
-
 
 async function saveSleepSettings() {
   const dayStartVal = document.getElementById('dayStart').value.split(',');
@@ -928,7 +920,7 @@ async function loadLogs() {
     const shouldScroll = history.length > lastLogCount;
     lastLogCount = history.length;
 
-    const slice = history.slice(-50); // последние 50 в исходном порядке
+    const slice = history.slice(-50); // последние 50
 
     let html = '';
     slice.forEach(item => {
@@ -1030,6 +1022,7 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   }
 });
 
+// живое обновление статуса + строки phStatus
 async function refresh() {
   try {
     const r = await fetch('/api/state');
@@ -1040,6 +1033,17 @@ async function refresh() {
     document.getElementById('batt').textContent   = (js.batt/1000).toFixed(2) + 'V';
     document.getElementById('slaveTank').textContent    = js.tank;
     document.getElementById('slaveConsumed').textContent = js.cons;
+
+    const el = document.getElementById('phStatus');
+    if (js.preheat && js.preheat.enabled) {
+      if (js.preheat.running) {
+        el.textContent = 'Preheat: RUNNING, remain ' + js.preheat.remainSec + 's';
+      } else {
+        el.textContent = 'Preheat: scheduled, starts in ' + js.preheat.delaySec + 's';
+      }
+    } else {
+      el.textContent = 'Preheat: disabled';
+    }
   } catch(e) {
     console.error('Refresh error:', e);
   }
@@ -1073,7 +1077,7 @@ app.get('/api/state', (req, res) => {
   res.json(lastState);
 });
 
-// Старый вариант: GET /api/update?...
+// GET /api/update? ... + состояние прехита
 app.get('/api/update', (req, res) => {
   const {
     engine, heater, level, batt, tank, cons, seq,
@@ -1088,7 +1092,6 @@ app.get('/api/update', (req, res) => {
   lastState.cons   = parseInt(cons)   || 0;
   lastState.seq    = parseInt(seq)    || 0;
 
-  // Новое: состояние прехита от мастера
   if (ph_en !== undefined) {
     lastState.preheat = {
       enabled:   ph_en   === '1',
@@ -1108,8 +1111,7 @@ app.get('/api/update', (req, res) => {
   res.send('OK');
 });
 
-
-// Новый вариант: POST /api/update с JSON
+// POST /api/update (на будущее, если перейдёшь на JSON)
 app.post('/api/update', (req, res) => {
   const {
     engine,
@@ -1119,47 +1121,27 @@ app.post('/api/update', (req, res) => {
     tank,
     cons,
     seq,
-
-    // поля от слейва, если мастер их проксирует
     slave_batt,
     slave_tank,
     slave_cons,
     slave_seq
   } = req.body;
 
-  if (engine !== undefined) {
-    lastState.engine = engine;
-  }
-  if (heater !== undefined) {
-    lastState.heater = parseInt(heater) || 0;
-  }
-  if (level !== undefined) {
-    lastState.level = parseInt(level) || 0;
-  }
+  if (engine !== undefined) lastState.engine = engine;
+  if (heater !== undefined) lastState.heater = parseInt(heater) || 0;
+  if (level  !== undefined) lastState.level  = parseInt(level)  || 0;
 
-  if (batt_master !== undefined) {
-    lastState.batt = parseInt(batt_master) || 0;
-  } else if (slave_batt !== undefined) {
-    lastState.batt = parseInt(slave_batt) || 0;
-  }
+  if (batt_master !== undefined) lastState.batt = parseInt(batt_master) || 0;
+  else if (slave_batt !== undefined) lastState.batt = parseInt(slave_batt) || 0;
 
-  if (tank !== undefined) {
-    lastState.tank = parseInt(tank) || 0;
-  } else if (slave_tank !== undefined) {
-    lastState.tank = parseInt(slave_tank) || 0;
-  }
+  if (tank !== undefined) lastState.tank = parseInt(tank) || 0;
+  else if (slave_tank !== undefined) lastState.tank = parseInt(slave_tank) || 0;
 
-  if (cons !== undefined) {
-    lastState.cons = parseInt(cons) || 0;
-  } else if (slave_cons !== undefined) {
-    lastState.cons = parseInt(slave_cons) || 0;
-  }
+  if (cons !== undefined) lastState.cons = parseInt(cons) || 0;
+  else if (slave_cons !== undefined) lastState.cons = parseInt(slave_cons) || 0;
 
-  if (seq !== undefined) {
-    lastState.seq = parseInt(seq) || 0;
-  } else if (slave_seq !== undefined) {
-    lastState.seq = parseInt(slave_seq) || 0;
-  }
+  if (seq !== undefined) lastState.seq = parseInt(seq) || 0;
+  else if (slave_seq !== undefined) lastState.seq = parseInt(slave_seq) || 0;
 
   lastState.timestamp = Date.now();
 
@@ -1215,7 +1197,7 @@ app.post('/api/sleep_settings', (req, res) => {
   res.send('OK');
 });
 
-// Heater Auto-Start: сохраняет настройки и формирует PREHEAT для мастера
+// Heater Auto-Start: настройки + PREHEAT
 app.post('/api/heater_schedule', (req, res) => {
   const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
 
@@ -1228,27 +1210,26 @@ app.post('/api/heater_schedule', (req, res) => {
 
   console.log(`[${new Date().toISOString()}] Heater schedule updated:`, heaterSchedule);
 
-if (!heaterSchedule.enabled) {
-  // Убираем все висящие PREHEAT из очереди
-  commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
+  if (!heaterSchedule.enabled) {
+    // Выключили: чистим PREHEAT из очереди и шлём отмену мастеру
+    commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
 
-  // Отправляем мастеру команду на отмену локального таймера
-  const cancelCmd = 'PREHEAT=0,0,0,0;';
-  commandQueue.push(cancelCmd);
+    const cancelCmd = 'PREHEAT=0,0,0,0;';
+    commandQueue.push(cancelCmd);
 
-  commandHistory.push({
-    command: cancelCmd,
-    status: 'QUEUED',
-    timestamp: new Date().toISOString()
-  });
-  if (commandHistory.length > 100) commandHistory.shift();
+    commandHistory.push({
+      command: cancelCmd,
+      status: 'QUEUED',
+      timestamp: new Date().toISOString()
+    });
+    if (commandHistory.length > 100) commandHistory.shift();
 
-  console.log('[SCHEDULE] PREHEAT canceled by user');
+    console.log('[SCHEDULE] PREHEAT canceled by user');
 
-  return res.send('OK');
-}
+    return res.send('OK');
+  }
 
-  // Считаем delay до ближайшего старта (сегодня/завтра)
+  // Включили: считаем delay до ближайшего старта
   const now = new Date();
   let target = new Date();
   target.setHours(heaterSchedule.hour);
@@ -1257,7 +1238,6 @@ if (!heaterSchedule.enabled) {
   target.setMilliseconds(0);
 
   if (target.getTime() <= now.getTime()) {
-    // если время уже прошло сегодня — переносим на завтра
     target.setDate(target.getDate() + 1);
   }
 
@@ -1266,7 +1246,6 @@ if (!heaterSchedule.enabled) {
   const autoR    = heaterSchedule.autoReady ? 1 : 0;
   const lvl      = heaterSchedule.heaterLevel || 5;
 
-  // Убираем старые PREHEAT, чтобы не конфликтовали
   commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
 
   const cmdLine = `PREHEAT=${delaySec},${durSec},${autoR},${lvl};`;
@@ -1303,7 +1282,7 @@ app.get('/api/queue_cmd', (req, res) => {
   res.send('OK');
 });
 
-// ACK от мастера — без NONE
+// ACK от мастера
 app.get('/api/ack', (req, res) => {
   const { cmd, status } = req.query;
   if (!cmd || cmd === 'NONE') {
@@ -1325,12 +1304,12 @@ app.get('/api/ack', (req, res) => {
   res.send('OK');
 });
 
-// История команд для UI
+// История команд
 app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
 
-// Обновление lastState при ручных командах (ENGINE/HEATER/LEVEL)
+// Обновление lastState при ручных командах
 function applyCommandToState(cmdLine) {
   const parts = cmdLine.split(';');
   parts.forEach(part => {
@@ -1354,14 +1333,13 @@ function applyCommandToState(cmdLine) {
   lastState.timestamp = Date.now();
 }
 
-// Очистка очереди (если надо из UI)
 app.post('/api/clear_queue', (req, res) => {
   commandQueue = [];
   res.send('OK');
 });
 
 // ============================================
-// OTA ENDPOINTS (с GitHub Auto-Sync)
+// OTA ENDPOINTS
 // ============================================
 
 app.post('/api/ota/upload/master', upload.single('firmware'), async (req, res) => {

@@ -288,7 +288,7 @@ let carTime = {
   lastLookup:  0            // когда последний раз обновляли (ms)
 };
 
-// Вспомогательная функция: обновить carTime по IP мастера
+// Обновление часового пояса по IP мастера
 function updateCarTimeFromIp(clientIp) {
   if (!clientIp) return;
 
@@ -301,7 +301,6 @@ function updateCarTimeFromIp(clientIp) {
   carTime.ip = clientIp;
   carTime.lastLookup = now;
 
-  // Пример с ipapi.co. Можно поменять на любой удобный GeoIP-сервис.
   const url = `https://ipapi.co/${clientIp}/json/`;
 
   https.get(url, (res) => {
@@ -311,10 +310,10 @@ function updateCarTimeFromIp(clientIp) {
       try {
         const js = JSON.parse(data);
         if (js.timezone) {
-          carTime.timezone = js.timezone; // например "Europe/Oslo"
+          carTime.timezone = js.timezone;
         }
         if (js.utc_offset) {
-          // ipapi.co даёт "+0100" или "+01:00" — нормализуем
+          // "+0100" или "+01:00"
           let off = js.utc_offset;
           if (typeof off === 'string') {
             off = off.replace(':','');
@@ -1160,7 +1159,7 @@ app.get('/api/state', (req, res) => {
 
 // GET /api/update? ... + состояние прехита
 app.get('/api/update', (req, res) => {
-  // IP мастера (с учётом прокси Render)
+  // IP мастера (через прокси Render)
   const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
     .split(',')[0]
     .replace('::ffff:', '')
@@ -1331,10 +1330,10 @@ app.post('/api/heater_schedule', (req, res) => {
   }
 
   // Включили: считаем delay до ближайшего старта в ЛОКАЛЬНОМ времени машины
-  const nowUtcMs   = Date.now();
-  const offsetSec  = carTime.offsetSec || 0;       // смещение машины от UTC
-  const nowCarMs   = nowUtcMs + offsetSec * 1000;  // "часы" машины
-  const nowCar     = new Date(nowCarMs);
+  const nowUtcMs  = Date.now();
+  const offsetSec = carTime.offsetSec || 0;
+  const nowCarMs  = nowUtcMs + offsetSec * 1000;  // «часы» машины
+  const nowCar    = new Date(nowCarMs);
 
   let targetCar = new Date(nowCarMs);
   targetCar.setHours(heaterSchedule.hour);
@@ -1342,7 +1341,6 @@ app.post('/api/heater_schedule', (req, res) => {
   targetCar.setSeconds(0);
   targetCar.setMilliseconds(0);
 
-  // Если целевое время уже прошло в локальном времени машины — берём следующий день
   if (targetCar.getTime() <= nowCar.getTime()) {
     targetCar.setDate(targetCar.getDate() + 1);
   }

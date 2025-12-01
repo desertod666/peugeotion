@@ -251,6 +251,7 @@ let lastState = {
   tank:   0,
   cons:   0,
   seq:    0,
+  heaterError: 0,
   timestamp: Date.now()
 };
 
@@ -397,6 +398,7 @@ app.get('/', (req, res) => {
     <div class="hdr">Vehicle Status</div>
     <div class="row space"><span>Engine:</span><span id="engBadge" class="badge">OFF</span></div>
     <div class="row space"><span>Heater:</span><span id="heaterBadge" class="badge">OFF</span></div>
+    <div class="row space"><span>Heater Error:</span><span id="heaterErrTag" class="badge">OK</span></div>
   </div>
   <div class="card sensors">
     <div class="hdr">Sensors</div>
@@ -496,6 +498,16 @@ async function refresh() {
   try {
     const r=await fetch('/api/state');
     const js=await r.json();
+
+    const err = js.heaterError || 0;
+    const errTag = document.getElementById('heaterErrTag');
+    if (errTag) {
+      let text = 'OK';
+      if (err === 1) text = 'NO FUEL';
+      else if (err === 2) text = 'SHORT FUEL';
+      else if (err === 3) text = 'LOW VOLT';
+      errTag.textContent = text;
+    }
 
     // фактическое состояние для бейджей
     const realEngine = js.engine;
@@ -1174,7 +1186,8 @@ app.get('/api/state', (req, res) => {
     ...lastState,
     desiredEngine: desiredState.engine,
     desiredHeater: desiredState.heater,
-    desiredLevel:  desiredState.level
+    desiredLevel:  desiredState.level,
+    heaterError:   lastState.heaterError
   });
 });
 
@@ -1193,6 +1206,8 @@ app.get('/api/update', (req, res) => {
     ph_en, ph_run, ph_delay, ph_rem, ph_dur, ph_lvl, ph_auto
   } = req.query;
 
+  const herr = parseInt(req.query.herr || '0', 10) || 0;
+
   lastState.engine = engine || 'OFF';
   lastState.heater = parseInt(heater) || 0;
   lastState.level  = parseInt(level)  || 1;
@@ -1200,6 +1215,7 @@ app.get('/api/update', (req, res) => {
   lastState.tank   = parseInt(tank)   || 0;
   lastState.cons   = parseInt(cons)   || 0;
   lastState.seq    = parseInt(seq)    || 0;
+  lastState.heaterError = herr;
 
   if (ph_en !== undefined) {
     lastState.preheat = {

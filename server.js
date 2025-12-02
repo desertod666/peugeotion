@@ -39,7 +39,6 @@
   MASTER_UPDATE=1.0.1;     - OTA обновление мастера
   SLAVE_UPDATE=1.0.1;      - OTA обновление слейва
 
-
   ✅ MASTER → СЕРВЕР
   ─────────────────────────────────────────
   GET  /api/update?engine=ACC&heater=1&level=5&batt=12800&tank=5000&cons=120&seq=42
@@ -693,17 +692,17 @@ app.get('/config', (req, res) => {
   const stateAge = Math.floor((Date.now() - lastState.timestamp) / 1000);
   const isOnline = stateAge < 120;
 
+  let minuteOptions = '';
+  for(let i=0; i<=59; i++) {
+    minuteOptions += `<option value="${i}">${String(i).padStart(2,'0')}</option>`;
+  }
+
   let timeOptions = '';
   for(let h = 0; h <= 23; h++) {
     for(let m = 0; m < 60; m += 30) {
       const timeStr = `${h}:${String(m).padStart(2, '0')}`;
       timeOptions += `<option value="${h},${m}">${timeStr}</option>`;
     }
-  }
-
-  let minuteOptions = '';
-  for(let i=0; i<=59; i++) {
-    minuteOptions += `<option value="${i}">${String(i).padStart(2,'0')}</option>`;
   }
 
   let levelOptions = '';

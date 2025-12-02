@@ -339,7 +339,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
-// ГЛАВНАЯ СТРАНИЦА
+// ГЛАВНАЯ СТРАНИЦА (Dashboard с фиксом отскока)
 // ============================================
 
 app.get('/', (req, res) => {
@@ -409,6 +409,7 @@ app.get('/', (req, res) => {
 </div>
 <script>
 let state={engine:'OFF',heater:0,level:1};
+let uiPendingUntil = 0; // окно "заморозки" локального heater/level после клика
 let pressT=0,holdTimer=null,tempIgn=false,beforeHold='OFF';
 const power=document.getElementById('power'), knob=document.getElementById('knob'), slider=document.getElementById('engSlider');
 const heaterBtn=document.getElementById('heaterBtn'), heaterCtl=document.getElementById('heaterCtl'), heatSegs=document.getElementById('heatSegs');
@@ -418,6 +419,8 @@ const doorSlider=document.getElementById('doorSlider'), doorKnob=document.getEle
 let heaterDebounceTimer = null;
 function debounceHeater(cmd) {
   if (heaterDebounceTimer) clearTimeout(heaterDebounceTimer);
+  // 2.5 c после клика не трогаем state.heater/state.level из сервера
+  uiPendingUntil = Date.now() + 2500;
   heaterDebounceTimer = setTimeout(() => {
     fetch('/api/queue_cmd?cmd='+cmd);
     console.log('Sent to server:', cmd);
@@ -508,22 +511,26 @@ async function refresh() {
       errTag.textContent = text;
     }
 
-    // фактическое состояние для бейджей
+    // фактическое состояние от мастера
     const realEngine = js.engine;
     const realHeater = js.heater;
     const realLevel  = js.level;
 
-    // желаемое состояние (если есть) для управления
-    state.engine = js.desiredEngine || realEngine;
-    state.heater = (js.desiredHeater !== undefined) ? js.desiredHeater : realHeater;
-    state.level  = js.desiredLevel  || realLevel;
+    // желаемое состояние для управления (двигатель — всегда можно обновлять)
+    state.engine = (js.desiredEngine !== undefined) ? js.desiredEngine : realEngine;
 
-    // используем real* для сенсоров/бейджей
+    // heater/level обновляем только если окно "ожидания" истекло
+    if (Date.now() >= uiPendingUntil) {
+      state.heater = (js.desiredHeater !== undefined) ? js.desiredHeater : realHeater;
+      state.level  = (js.desiredLevel  !== undefined) ? js.desiredLevel  : realLevel;
+    }
+
+    // сенсоры/бейджи всегда из фактического состояния
     document.getElementById('battTag').textContent=(js.batt/1000).toFixed(2)+'V';
     document.getElementById('tankTag').textContent=js.tank+' ml';
     document.getElementById('fuelTag').textContent=js.cons+' ml';
 
-    // сохраним фактические значения в глобальном объекте для бейджей
+    // сохраняем фактические значения для бейджей
     state.realEngine = realEngine;
     state.realHeater = realHeater;
     state.realLevel  = realLevel;
@@ -1027,7 +1034,7 @@ async function loadLogs() {
     const shouldScroll = history.length > lastLogCount;
     lastLogCount = history.length;
 
-    const slice = history.slice(-50); // последние 50
+    const slice = history.slice(-50);
 
     let html = '';
     slice.forEach(item => {
@@ -1129,7 +1136,6 @@ document.getElementById('slaveForm').addEventListener('submit', async (e) => {
   }
 });
 
-// живое обновление статуса + строки phStatus
 async function refresh() {
   try {
     const r = await fetch('/api/state');
@@ -1192,7 +1198,6 @@ app.get('/api/state', (req, res) => {
 
 // GET /api/update? ... + состояние прехита
 app.get('/api/update', (req, res) => {
-  // IP мастера (через прокси Render)
   const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
     .split(',')[0]
     .replace('::ffff:', '')
@@ -1235,7 +1240,6 @@ app.get('/api/update', (req, res) => {
   res.send('OK');
 });
 
-// POST /api/update (на будущее, если перейдёшь на JSON)
 app.post('/api/update', (req, res) => {
   const {
     engine,
@@ -1284,7 +1288,6 @@ app.get('/api/time', (req, res) => {
   });
 });
 
-// Опционально: локальное время машины
 app.get('/api/car_time', (req, res) => {
   const nowUtcMs = Date.now();
   const offsetSec = carTime.offsetSec || 0;
@@ -1333,7 +1336,7 @@ app.post('/api/sleep_settings', (req, res) => {
   res.send('OK');
 });
 
-// Heater Auto-Start: настройки + PREHEAT
+// Heater Auto-Start
 app.post('/api/heater_schedule', (req, res) => {
   const { enabled, hour, minute, heaterLevel, preHeatTime, autoReady } = req.body;
 
@@ -1347,7 +1350,6 @@ app.post('/api/heater_schedule', (req, res) => {
   console.log(`[${new Date().toISOString()}] Heater schedule updated:`, heaterSchedule);
 
   if (!heaterSchedule.enabled) {
-    // Выключили: чистим PREHEAT из очереди и шлём отмену мастеру
     commandQueue = commandQueue.filter(c => !c.startsWith('PREHEAT='));
 
     const cancelCmd = 'PREHEAT=0,0,0,0;';
@@ -1365,10 +1367,9 @@ app.post('/api/heater_schedule', (req, res) => {
     return res.send('OK');
   }
 
-  // Включили: считаем delay до ближайшего старта в ЛОКАЛЬНОМ времени машины
   const nowUtcMs  = Date.now();
   const offsetSec = carTime.offsetSec || 0;
-  const nowCarMs  = nowUtcMs + offsetSec * 1000;  // «часы» машины
+  const nowCarMs  = nowUtcMs + offsetSec * 1000;
   const nowCar    = new Date(nowCarMs);
 
   let targetCar = new Date(nowCarMs);
@@ -1404,11 +1405,30 @@ app.post('/api/heater_schedule', (req, res) => {
 });
 
 // Ручная очередь команд (из UI)
+function applyCommandToDesired(cmd) {
+  if (cmd.startsWith('ENGINE=')) {
+    const mode = cmd.substring(7, cmd.indexOf(';'));
+    desiredState.engine = mode || 'OFF';
+  } else if (cmd.startsWith('HEATER=')) {
+    const v = parseInt(cmd.substring(7, cmd.indexOf(';')) || '0', 10);
+    desiredState.heater = v ? 1 : 0;
+    if (!v) desiredState.level = 0;
+    else if (desiredState.level === 0) desiredState.level = 1;
+  } else if (cmd.startsWith('LEVEL=')) {
+    const v = parseInt(cmd.substring(6, cmd.indexOf(';')) || '1', 10);
+    if (v >= 1 && v <= 9) {
+      desiredState.level = v;
+      if (desiredState.heater === 0) desiredState.heater = 1;
+    }
+  }
+}
+
 app.get('/api/queue_cmd', (req, res) => {
-  const { cmd } = req.query;
-  if (!cmd) return res.status(400).send('Missing cmd');
+  const cmd = (req.query.cmd || '').trim();
+  if (!cmd) return res.status(400).send('No cmd');
 
   commandQueue.push(cmd);
+  applyCommandToDesired(cmd);
 
   commandHistory.push({
     command: cmd,
@@ -1416,8 +1436,6 @@ app.get('/api/queue_cmd', (req, res) => {
     timestamp: new Date().toISOString()
   });
   if (commandHistory.length > 100) commandHistory.shift();
-
-  applyCommandToState(cmd);
 
   res.send('OK');
 });
@@ -1444,32 +1462,9 @@ app.get('/api/ack', (req, res) => {
   res.send('OK');
 });
 
-// История команд
 app.get('/api/history', (req, res) => {
   res.json(commandHistory);
 });
-
-function applyCommandToState(cmdLine) {
-  const parts = cmdLine.split(';');
-  parts.forEach(part => {
-    if (!part.trim()) return;
-    const [key, val] = part.split('=').map(s => s.trim());
-
-    if (key === 'ENGINE') {
-      desiredState.engine = val;
-    } else if (key === 'HEATER') {
-      desiredState.heater = parseInt(val);
-      if (desiredState.heater === 0) desiredState.level = 0;
-      else if (desiredState.level === 0) desiredState.level = 1;
-    } else if (key === 'LEVEL') {
-      const lvl = parseInt(val);
-      if (lvl >= 1 && lvl <= 9) {
-        desiredState.level = lvl;
-        if (desiredState.heater === 0) desiredState.heater = 1;
-      }
-    }
-  });
-}
 
 app.post('/api/clear_history', (req, res) => {
   commandHistory = [];
